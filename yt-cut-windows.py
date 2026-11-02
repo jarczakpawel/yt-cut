@@ -895,7 +895,7 @@ def media_check():
                       "-pix_fmt", "yuv420p", sample]
             subprocess.run(create, check=True, timeout=20, creationflags=CREATE_NO_WINDOW)
             export = subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
-                                     "-ss", ".25", "-i", sample, "-t", ".5", "-c:v",
+                                     "-ss", "0.25", "-i", sample, "-t", "0.5", "-c:v",
                                      "libx264", "-crf", "18", "-preset", "fast", out],
                                     capture_output=True, text=True, timeout=20,
                                     creationflags=CREATE_NO_WINDOW)

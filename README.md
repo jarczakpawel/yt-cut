@@ -44,10 +44,12 @@ The Linux version embeds mpv in a GTK window, so it needs a running X11/XWayland
 - Step through frames and restart playback from START
 - Preview only the selected interval, with optional looping
 - Export to **MP4 by default**, or select MP3 or WAV
-- Optionally fade audio in and/or out, with adjustable fade duration
-- **Crop video directly in the player** by dragging four corner handles or drawing a new selection\n- **Responsive Windows UI** keeps the full crop preview in the player, moves crop controls below it and scrolls lower settings on small screens
+- Optionally fade audio in at START or out at END, with adjustable fade duration
+- Cancel a running export without leaving an unfinished output file
+- **Crop video directly in the player** by dragging four corner handles or drawing a new selection
+- **Responsive Windows UI** keeps the full crop preview in the player, moves crop controls below it and scrolls lower settings on small screens
 - Resize from **four round corner handles or any of the four edges**; the pointer changes to horizontal, vertical or diagonal resize cursors
-- Drag inside the selected crop to reposition it; adjust X/Y/width/height in pixels or choose an aspect ratio (16:9, 9:16, 1:1, 4:3, 3:4)
+- Drag inside the selected crop to reposition it, or enter precise X/Y/width/height coordinates in pixels
 - Crop boundaries are mapped to source pixels, with even output dimensions for H.264 and unmodified audio
 - Automatically name output files `cut1.mp4`, `cut2.mp3`, and so on
 - Save exported files in **Downloads**
@@ -58,10 +60,10 @@ The Linux version embeds mpv in a GTK window, so it needs a running X11/XWayland
 1. Paste a YouTube URL and select **Download**.
 2. To download only part of a long video, enable **Download only a fragment** under the URL, enter **FROM** and **TO**, then start the download. Otherwise the entire video is downloaded. The preview timeline starts at zero for the downloaded fragment.
 3. Click the timeline to select a position (yellow marker). The white indicator shows the current playback position.
-4. Use **Set START from point** and **Set END from point**, drag the red markers, or enter timestamps directly.
-5. Optionally select **Crop video** next to the playback and frame-step controls below the player. Draw or resize the crop directly over the paused frame, then choose **Apply crop** or **Cancel**. **Reset crop** appears only while cropping or when a crop has been applied. Cropping only affects MP4.
+4. Use **Ustaw START** and **Ustaw KONIEC**, drag the red markers, or enter timestamps directly.
+5. Optionally select **Kadruj obraz** below the player. Move or resize the crop or adjust its pixel coordinates; changes apply instantly. Press **Zakończ kadrowanie** to keep the crop, **Resetuj kadr** to clear it or **Anuluj kadr** to discard changes and exit. Cropping affects MP4 only.
 6. Select the output format and optional audio fades.
-7. Choose **Cut and save**. The exported file appears in your Downloads directory.
+7. Choose **Wytnij i zapisz do Pobrane**. The file appears in Downloads. During processing, **Anuluj eksport** stops the job without producing an output.
 
 **Timeline controls:**
 - Click: select a playback position

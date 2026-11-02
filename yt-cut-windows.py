@@ -16,11 +16,11 @@ from crop_editor_qt import CropPanel
 from mpv_player import VideoSurface, MpvPlayer
 
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, QRectF, QPointF
-from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
+from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF, QPalette
 from PySide6.QtWidgets import (
     QApplication, QWidget, QMainWindow, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QComboBox, QCheckBox, QDoubleSpinBox, QProgressBar,
-    QFrame, QStackedWidget, QScrollArea, QSizePolicy,
+    QFrame, QStackedWidget, QScrollArea, QSizePolicy, QListView,
 )
 
 BASE = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -57,7 +57,7 @@ def parse_clock(text):
 class Events(QObject):
     progress = Signal(int, float, str)
     downloaded = Signal(int, str, int, float, str, str)
-    failed = Signal(int, str)
+    failed = Signal(int, str, str)
     exported = Signal(int, str)
 
 
@@ -168,7 +168,7 @@ class Timeline(QWidget):
 class Window(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("YT Cut v1.0.18")
+        self.setWindowTitle("YT Cut v1.0.19")
         self.resize(1060, 750)
         self.setMinimumSize(640, 420)
         self.duration = 0
@@ -180,12 +180,15 @@ class Window(QMainWindow):
         self.media = None
         self.preview_media = None
         self.crop_rect = None
+        self.crop_original = None
         self.directory = None
         self.old_dirs = []
         self.download_job = 0
         self.export_job = 0
         self.download_proc = None
         self.export_proc = None
+        self.exporting = False
+        self.export_lock = threading.Lock()
         self.restoring = False
         self.last_error = ""
         self.is_downloading = False
@@ -209,6 +212,12 @@ class Window(QMainWindow):
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setCentralWidget(self.scroll)
         center = QWidget()
+        center.setObjectName("mainContent")
+        center.setAutoFillBackground(True)
+        palette = center.palette()
+        palette.setColor(QPalette.Window, QColor("#161920"))
+        center.setPalette(palette)
+        self.scroll.viewport().setStyleSheet("background-color:#161920;")
         self.scroll.setWidget(center)
         main = QVBoxLayout(center)
         main.setContentsMargins(16, 12, 16, 12)
@@ -290,12 +299,16 @@ class Window(QMainWindow):
         self.restart_button.clicked.connect(self.restart)
         controls.addWidget(self.restart_button)
         self.crop_button = QPushButton("Kadruj obraz")
-        self.crop_button.clicked.connect(self.open_crop)
+        self.crop_button.clicked.connect(self.toggle_crop)
         controls.addWidget(self.crop_button)
         self.crop_reset = QPushButton("Resetuj kadr")
         self.crop_reset.clicked.connect(self.reset_crop)
         self.crop_reset.setVisible(False)
         controls.addWidget(self.crop_reset)
+        self.crop_cancel = QPushButton("Anuluj kadr")
+        self.crop_cancel.clicked.connect(self.cancel_crop)
+        self.crop_cancel.setVisible(False)
+        controls.addWidget(self.crop_cancel)
         controls.addStretch()
         self.position_text = QLabel(f"{clock(0)} / {clock(0)}")
         self.position_text.setObjectName("clock")
@@ -315,9 +328,9 @@ class Window(QMainWindow):
             field.setFixedWidth(160)
             field.editingFinished.connect(lambda k=kind: self.edit_time(k))
             times.addLayout(col)
-        marks = QVBoxLayout()
-        self.mark_start_button = QPushButton("Ustaw START z punktu")
-        self.mark_end_button = QPushButton("Ustaw KONIEC z punktu")
+        marks = QHBoxLayout()
+        self.mark_start_button = QPushButton("Ustaw START")
+        self.mark_end_button = QPushButton("Ustaw KONIEC")
         self.mark_start_button.clicked.connect(lambda: self.mark("start"))
         self.mark_end_button.clicked.connect(lambda: self.mark("end"))
         marks.addWidget(self.mark_start_button)
@@ -341,9 +354,15 @@ class Window(QMainWindow):
         self.format.addItem("Wideo MP4 (domyślnie)", "mp4")
         self.format.addItem("Audio MP3", "mp3")
         self.format.addItem("Audio WAV", "wav")
+        self.format.setView(QListView())
+        self.format.view().setStyleSheet(
+            "QListView { background:#242a34; color:#ebedf2; border:1px solid #424a58; "
+            "selection-background-color:#ed5350; selection-color:#ffffff; outline:0; }"
+            "QListView::item { padding:6px 8px; min-height:25px; }"
+            "QListView::item:selected { background:#ed5350; color:#ffffff; }")
         settings.addWidget(self.format)
-        self.fade_in = QCheckBox("Płynne podgłaśnianie")
-        self.fade_out = QCheckBox("Płynne ściszanie")
+        self.fade_in = QCheckBox("Podgłośnienie (START)")
+        self.fade_out = QCheckBox("Ściszenie (KONIEC)")
         settings.addWidget(self.fade_in)
         settings.addWidget(self.fade_out)
         settings.addWidget(QLabel("Czas:"))
@@ -364,14 +383,20 @@ class Window(QMainWindow):
         self.export_button.setObjectName("primary")
         self.export_button.clicked.connect(self.export)
         foot.addWidget(self.export_button)
+        self.cancel_export_button = QPushButton("Anuluj eksport")
+        self.cancel_export_button.clicked.connect(self.cancel_export)
+        self.cancel_export_button.setVisible(False)
+        foot.addWidget(self.cancel_export_button)
         main.addLayout(foot)
         self.update_enabled()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.start(30)
         self.setStyleSheet("""
-QMainWindow,QScrollArea { background:#161920; }
+QMainWindow,QScrollArea,QWidget#mainContent { background:#161920; }
 QWidget { color:#ebedf2; font-size:13px; }
+QComboBox QAbstractItemView { background:#242a34; color:#ebedf2; selection-background-color:#ed5350; selection-color:#ffffff; }
+QComboBox QAbstractItemView::item:selected { background:#ed5350; color:#ffffff; }
 QScrollBar:vertical { background:#1c212a; width:10px; margin:0; }
 QScrollBar::handle:vertical { background:#46505f; border-radius:5px; min-height:35px; }
 QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical { height:0; }
@@ -409,11 +434,14 @@ QCheckBox { spacing:5px; }
         ready = self.media is not None
         self.crop_button.setEnabled(ready)
         self.crop_reset.setEnabled(ready)
-        self.crop_reset.setVisible(self.crop_rect is not None or self.crop_panel is not None)
+        self.crop_cancel.setEnabled(ready)
+        self.crop_reset.setVisible(self.crop_panel is not None)
+        self.crop_cancel.setVisible(self.crop_panel is not None)
         for widget in (self.play_button, self.back_button, self.next_button, self.restart_button,
                        self.mark_start_button, self.mark_end_button, self.start_edit, self.end_edit):
             widget.setEnabled(ready)
-        self.export_button.setEnabled(ready and (self.export_proc is None or self.export_proc.poll() is not None))
+        self.export_button.setEnabled(ready and not self.exporting)
+        self.cancel_export_button.setVisible(self.exporting)
 
     def update_fields(self):
         self.start_edit.setText(clock(self.start))
@@ -589,6 +617,8 @@ QCheckBox { spacing:5px; }
         self.old_dirs = remaining
 
     def download(self):
+        if self.exporting:
+            self.cancel_export()
         url = self.url.text().strip()
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
@@ -743,7 +773,7 @@ QCheckBox { spacing:5px; }
             pass
         except Exception as error:
             if job == self.download_job:
-                self.signals.failed.emit(job, str(error))
+                self.signals.failed.emit(job, "Pobieranie", str(error))
         finally:
             if job == self.download_job:
                 self.download_proc = None
@@ -793,18 +823,22 @@ QCheckBox { spacing:5px; }
         self.download_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
 
-    def on_failed(self, job, message):
-        if job == self.download_job:
+    def on_failed(self, job, kind, message):
+        if kind == "Pobieranie":
+            if job != self.download_job:
+                return
             self.is_downloading = False
             self.download_button.setEnabled(True)
             self.cancel_button.setEnabled(False)
-            self.status.setText("Błąd pobierania: " + message[-420:])
-        elif job == self.export_job:
+        else:
+            if job != self.export_job:
+                return
+            self.exporting = False
             self.update_enabled()
-            self.status.setText("Błąd eksportu: " + message[-420:])
+        self.status.setText(f"Błąd {kind.lower()}: {message[-420:]}")
         self.progress.setRange(0, 1000)
         self.progress.setValue(0)
-        self.progress.setFormat("Error")
+        self.progress.setFormat("Błąd")
 
     def cancel_download(self):
         self.is_downloading = False
@@ -826,14 +860,22 @@ QCheckBox { spacing:5px; }
             self.crop_button.setToolTip(f"Kadr: {width} x {height} px | X={x} Y={y}")
         else:
             self.crop_button.setToolTip("Kadrowanie: wyłączone")
-        self.crop_reset.setEnabled(bool(self.media))
-        self.crop_reset.setVisible(self.crop_rect is not None or self.crop_panel is not None)
+        editing = self.crop_panel is not None
+        self.crop_button.setText("Zakończ kadrowanie" if editing else "Kadruj obraz")
+        self.crop_reset.setVisible(editing)
+        self.crop_cancel.setVisible(editing)
+
+    def crop_changed(self, crop):
+        self.crop_rect = crop
+        self.update_crop_status()
 
     def reset_crop(self):
         self.crop_rect = None
-        if self.crop_panel is not None:
-            self.crop_panel.set_crop((0, 0, self.crop_panel.width, self.crop_panel.height))
-        self.update_crop_status()
+        self.close_crop()
+
+    def cancel_crop(self):
+        self.crop_rect = self.crop_original
+        self.close_crop()
 
     def close_crop(self):
         if self.crop_panel is not None:
@@ -843,13 +885,16 @@ QCheckBox { spacing:5px; }
             self.video_stack.removeWidget(self.crop_panel)
             self.crop_panel.deleteLater()
             self.crop_panel = None
+            self.crop_original = None
             self.player.pause()
             self.update_enabled()
-
-    def finish_crop(self, crop):
-        self.crop_rect = crop
-        self.close_crop()
         self.update_crop_status()
+
+    def toggle_crop(self):
+        if self.crop_panel is not None:
+            self.close_crop()
+        else:
+            self.open_crop()
 
     def open_crop(self):
         if not self.media or self.crop_panel is not None:
@@ -869,21 +914,21 @@ QCheckBox { spacing:5px; }
             )
             if output.returncode or not Path(image).is_file():
                 raise RuntimeError(output.stderr[-350:] or "Brak klatki filmu")
-            self.crop_panel = CropPanel(image, self.crop_rect, self.finish_crop, self.close_crop)
+            self.crop_original = self.crop_rect
+            self.crop_panel = CropPanel(image, self.crop_rect, self.crop_changed)
             self.video_stack.addWidget(self.crop_panel)
             self.content_layout.insertWidget(self.crop_toolbar_index, self.crop_panel.toolbar)
             self.crop_panel.toolbar.show()
             self.video_stack.setCurrentWidget(self.crop_panel)
+            self.update_crop_status()
             QTimer.singleShot(0, lambda: self.scroll.ensureWidgetVisible(self.video_stack, 0, 0))
-            self.crop_button.setEnabled(False)
-            self.crop_reset.setVisible(True)
             for widget in (self.play_button, self.back_button, self.next_button, self.restart_button):
                 widget.setEnabled(False)
         except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
             self.status.setText(f"Błąd kadrowania: {exc}")
 
     def export(self):
-        if not self.media or self.export_proc and self.export_proc.poll() is None:
+        if not self.media or self.exporting:
             return
         self.edit_time("start")
         self.edit_time("end")
@@ -896,7 +941,9 @@ QCheckBox { spacing:5px; }
                    if (match := re.fullmatch(r"cut(\d+)\.(mp4|mp3|wav)", p.name, re.I))]
         number = max(numbers, default=0) + 1
         target = DOWNLOADS / f"cut{number}.{mode}"
-        temp = DOWNLOADS / f".cut{number}.{mode}.part"
+        self.export_job += 1
+        job = self.export_job
+        temp = DOWNLOADS / f".cut{number}.{job}.{mode}.part"
         start = self.start / 1000
         length = (self.end - self.start) / 1000
         effects, fade = [], self.fade_seconds.value()
@@ -921,9 +968,8 @@ QCheckBox { spacing:5px; }
         if effects:
             args += ["-af", ",".join(effects)]
         args += ["-f", mode, str(temp)]
-        self.export_job += 1
-        job = self.export_job
-        self.export_button.setEnabled(False)
+        self.exporting = True
+        self.update_enabled()
         self.progress.setRange(0, 1000)
         self.progress.setValue(0)
         self.progress.setFormat("Exporting 0%")
@@ -953,15 +999,16 @@ QCheckBox { spacing:5px; }
                     errors.append(line)
                     errors = errors[-10:]
             rc = proc.wait()
-            if job != self.export_job:
-                return
-            if rc:
+            if rc and job == self.export_job:
                 raise RuntimeError("\n".join(errors[-5:]) or f"FFmpeg: {rc}")
-            temp.replace(target)
+            with self.export_lock:
+                if job != self.export_job:
+                    return
+                temp.replace(target)
             self.signals.exported.emit(job, str(target))
         except Exception as error:
             if job == self.export_job:
-                self.signals.failed.emit(job, str(error))
+                self.signals.failed.emit(job, "Eksport", str(error))
         finally:
             try:
                 temp.unlink(missing_ok=True)
@@ -970,13 +1017,32 @@ QCheckBox { spacing:5px; }
             if job == self.export_job:
                 self.export_proc = None
 
+    def cancel_export(self):
+        if not self.exporting:
+            return
+        with self.export_lock:
+            self.export_job += 1
+            self.exporting = False
+        process = self.export_proc
+        if process is not None and process.poll() is None:
+            try:
+                process.terminate()
+            except OSError:
+                pass
+        self.update_enabled()
+        self.progress.setRange(0, 1000)
+        self.progress.setValue(0)
+        self.progress.setFormat("Eksport anulowany")
+        self.status.setText("Eksport anulowany. Nie zapisano pliku.")
+
     def on_exported(self, job, path):
         if job != self.export_job:
             return
+        self.exporting = False
+        self.update_enabled()
         self.progress.setValue(1000)
         self.progress.setFormat("Export complete 100%")
         self.status.setText(f"Zapisano: {path}")
-        self.export_button.setEnabled(True)
 
     def closeEvent(self, event):
         self.download_job += 1
@@ -1041,6 +1107,7 @@ def media_check():
             window.media = video
             window.duration = 2000
             window.end = 2000
+            window.update_fields()
             window.update_enabled()
             window.player.setSource(video)
             window.player.play()
@@ -1071,13 +1138,65 @@ def media_check():
             if window.scroll.verticalScrollBar().maximum() < 1:
                 raise RuntimeError("Low-resolution window cannot scroll lower controls")
             window.crop_panel.set_crop((22, 36, 240, 420))
-            window.finish_crop(window.crop_panel.crop)
-            if window.crop_rect != (22, 36, 240, 420) or window.crop_panel is not None:
-                raise RuntimeError("Cropping did not return to video with selected coordinates")
+            if window.crop_rect != (22, 36, 240, 420):
+                raise RuntimeError("Crop selection did not update export coordinates")
+            window.toggle_crop()
+            if window.crop_panel is not None or window.crop_rect != (22, 36, 240, 420):
+                raise RuntimeError("Crop was not kept when exiting edit mode")
+            window.open_crop()
+            window.crop_panel.set_crop((36, 50, 200, 400))
+            window.cancel_crop()
+            if window.crop_panel is not None or window.crop_rect != (22, 36, 240, 420):
+                raise RuntimeError("Cancel crop did not restore the previous crop")
+            window.open_crop()
+            window.reset_crop()
+            if window.crop_rect is not None or window.crop_panel is not None:
+                raise RuntimeError("Reset crop did not remove the crop and exit editing")
+            window.open_crop()
+            window.crop_panel.set_crop((36, 50, 200, 400))
+            window.cancel_crop()
+            if window.crop_rect is not None or window.crop_panel is not None:
+                raise RuntimeError("Cancel after resetting did not discard the new crop")
+            if window.crop_reset.isVisible() or window.crop_cancel.isVisible():
+                raise RuntimeError("Crop action buttons remain visible after cancelling")
+            if window.scroll.widget().palette().color(QPalette.Window).name() != "#161920":
+                raise RuntimeError("The central scrollable panel has the wrong theme background")
+            if "#242a34" not in window.format.view().styleSheet():
+                raise RuntimeError("Dropdown list is missing dark theme styling")
+            global DOWNLOADS
+            DOWNLOADS = Path(directory) / "Downloads"
+            window.export()
+            if not window.exporting or not window.cancel_export_button.isVisible():
+                raise RuntimeError("Export cancellation button not enabled")
+            window.cancel_export()
+            if window.exporting or window.cancel_export_button.isVisible():
+                raise RuntimeError("Export cancellation did not restore controls")
+            deadline = time.monotonic() + 6
+            while any(DOWNLOADS.glob("*.part")) and time.monotonic() < deadline:
+                app.processEvents()
+                time.sleep(.05)
+            if list(DOWNLOADS.glob("*.part")) or list(DOWNLOADS.glob("cut*.mp4")):
+                raise RuntimeError("Cancelled export left an output or temporary file")
+            window.crop_rect = (22, 36, 240, 420)
+            window.export()
+            deadline = time.monotonic() + 30
+            while window.exporting and time.monotonic() < deadline:
+                app.processEvents()
+                time.sleep(.03)
+            outputs = list(DOWNLOADS.glob("cut*.mp4"))
+            if window.exporting or len(outputs) != 1:
+                raise RuntimeError(f"Export after cancellation failed: {window.status.text()}")
+            dimensions = subprocess.run(
+                [FFPROBE, "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=width,height", "-of", "json", str(outputs[0])],
+                capture_output=True, text=True, timeout=15, creationflags=CREATE_NO_WINDOW)
+            if dimensions.returncode or json.loads(dimensions.stdout)["streams"][0] != {
+                "width": 240, "height": 420}:
+                raise RuntimeError("Exported crop dimensions do not match selection")
             window.close()
             log.write_text(
                 f"PASS: embedded VP9/Opus playback={position} ms, "
-                "responsive 900x600 crop viewport, separate tools and scroll support\n",
+                "900x600 crop, live editing, cancellable export, dark theme and valid 240x420 MP4\n",
                 encoding="utf-8")
     except Exception:
         import traceback
@@ -1128,7 +1247,7 @@ def download_check():
             )
             state = SimpleNamespace(
                 download_job=1, export_job=1, download_proc=None,
-                export_proc=None, signals=signals,
+                export_proc=None, export_lock=threading.Lock(), signals=signals,
             )
             directory = str(root / "download")
             Path(directory).mkdir()

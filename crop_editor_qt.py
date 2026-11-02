@@ -1,10 +1,8 @@
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QComboBox,
-                               QHBoxLayout, QLabel, QPushButton, QSpinBox,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QSpinBox, QVBoxLayout, QWidget
 
-from crop_geometry import clamp_crop, drag_crop, drag_crop_edge, crop_hit, fit_aspect
+from crop_geometry import clamp_crop, drag_crop, drag_crop_edge, crop_hit
 
 
 class CropCanvas(QWidget):
@@ -120,10 +118,9 @@ class CropCanvas(QWidget):
 
 
 class CropPanel(QWidget):
-    def __init__(self, filename, previous, applied, cancelled):
+    def __init__(self, filename, previous, changed):
         super().__init__()
-        self.applied = applied
-        self.cancelled = cancelled
+        self.changed = changed
         self.image = QPixmap(str(filename))
         if self.image.isNull():
             raise ValueError("Nie można odczytać klatki filmu")
@@ -139,62 +136,26 @@ class CropPanel(QWidget):
 
         self.toolbar = QWidget()
         self.toolbar.setObjectName("cropTools")
-        tools = QVBoxLayout(self.toolbar)
+        tools = QHBoxLayout(self.toolbar)
         tools.setContentsMargins(8, 4, 8, 4)
-        tools.setSpacing(4)
-
-        top = QHBoxLayout()
-        tools.addLayout(top)
-        top.addWidget(QLabel("Proporcje"))
-        self.ratios = QComboBox()
-        for label, ratio in (("Dowolne", None), ("16:9", 16 / 9), ("9:16", 9 / 16),
-                             ("1:1", 1), ("4:3", 4 / 3), ("3:4", 3 / 4)):
-            self.ratios.addItem(label, ratio)
-        self.ratios.setFixedWidth(105)
-        top.addWidget(self.ratios)
-
+        tools.setSpacing(6)
         self.fields = []
         for label, maximum in (("X", self.width), ("Y", self.height),
                                ("Szer.", self.width), ("Wys.", self.height)):
+            tools.addWidget(QLabel(label))
             spin = QSpinBox()
             spin.setRange(0, maximum)
-            spin.setFixedWidth(85)
+            spin.setFixedWidth(86)
             spin.valueChanged.connect(self.field_changed)
+            tools.addWidget(spin)
             self.fields.append(spin)
-        for name, field in zip(("X", "Y"), self.fields[:2]):
-            top.addWidget(QLabel(name))
-            top.addWidget(field)
-        top.addStretch()
+        tools.addStretch()
         self.info = QLabel()
-        top.addWidget(self.info)
-
-        bottom = QHBoxLayout()
-        tools.addLayout(bottom)
-        for name, field in zip(("Szer.", "Wys."), self.fields[2:]):
-            bottom.addWidget(QLabel(name))
-            bottom.addWidget(field)
-        bottom.addStretch()
-        cancel = QPushButton("Anuluj")
-        cancel.clicked.connect(cancelled)
-        bottom.addWidget(cancel)
-        reset = QPushButton("Resetuj")
-        reset.clicked.connect(lambda: self.set_crop((0, 0, self.width, self.height)))
-        bottom.addWidget(reset)
-        save = QPushButton("Zastosuj kadr")
-        save.clicked.connect(lambda: self.applied(
-            None if self.crop == (0, 0, self.width, self.height) else self.crop))
-        bottom.addWidget(save)
-
-        self.ratios.currentIndexChanged.connect(self.ratio_changed)
+        tools.addWidget(self.info)
         self.set_crop(self.crop)
 
     def aspect(self):
-        return self.ratios.currentData()
-
-    def ratio_changed(self, *_):
-        ratio = self.aspect()
-        if ratio:
-            self.set_crop(fit_aspect(self.crop, self.width, self.height, ratio))
+        return None
 
     def field_changed(self, *_):
         if not self.editing:
@@ -206,5 +167,6 @@ class CropPanel(QWidget):
         for field, value in zip(self.fields, self.crop):
             field.setValue(value)
         self.editing = False
-        self.info.setText(f"Obraz: {self.width} x {self.height}  |  Kadr: {self.crop[2]} x {self.crop[3]}")
+        self.info.setText(f"{self.crop[2]} x {self.crop[3]} px")
         self.canvas.update()
+        self.changed(None if self.crop == (0, 0, self.width, self.height) else self.crop)

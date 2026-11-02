@@ -42,6 +42,7 @@ jobs:
           & 'C:\Program Files\7-Zip\7z.exe' e -y "-o$env:RUNNER_TEMP\mpv-dev" $mpvArchive libmpv-2.dll
           if ($LASTEXITCODE -ne 0) { throw 'Extracting libmpv failed' }
           Copy-Item "$env:RUNNER_TEMP\mpv-dev\libmpv-2.dll" tools-bin\libmpv-2.dll
+          python tools/build_vulkan_loader.py tools-bin/vulkan-1.dll tools-bin/libmpv-2.dll
           & tools-bin\ffmpeg.exe -version | Select-Object -First 1
           & tools-bin\ffprobe.exe -version | Select-Object -First 1
           & tools-bin\yt-dlp.exe --version
@@ -51,12 +52,12 @@ jobs:
       - name: Bundle self-contained application
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --windowed --onedir --name YT-Cut --icon assets/yt-cut.ico --add-binary 'tools-bin/ffmpeg.exe;tools' --add-binary 'tools-bin/ffprobe.exe;tools' --add-binary 'tools-bin/yt-dlp.exe;tools' --add-binary 'tools-bin/node.exe;tools' --add-binary 'tools-bin/libmpv-2.dll;tools' yt-cut-windows.py
+          python -m PyInstaller --noconfirm --clean --windowed --onedir --name YT-Cut --icon assets/yt-cut.ico --add-binary 'tools-bin/ffmpeg.exe;tools' --add-binary 'tools-bin/ffprobe.exe;tools' --add-binary 'tools-bin/yt-dlp.exe;tools' --add-binary 'tools-bin/node.exe;tools' --add-binary 'tools-bin/libmpv-2.dll;tools' --add-binary 'tools-bin/vulkan-1.dll;tools' yt-cut-windows.py
       - name: Verify packaged executables
         shell: pwsh
         run: |
           $root = 'dist\YT-Cut'
-          foreach ($name in @('ffmpeg.exe','ffprobe.exe','yt-dlp.exe','node.exe','libmpv-2.dll')) {
+          foreach ($name in @('ffmpeg.exe','ffprobe.exe','yt-dlp.exe','node.exe','libmpv-2.dll','vulkan-1.dll')) {
             if (-not (Test-Path "$root\_internal\tools\$name")) { throw "Missing bundled tool: $name" }
           }
           $result = Start-Process -FilePath (Resolve-Path "$root\YT-Cut.exe").Path -ArgumentList "--self-check" -Wait -PassThru

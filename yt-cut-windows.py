@@ -168,7 +168,7 @@ class Timeline(QWidget):
 class Window(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("YT Cut v1.0.15")
+        self.setWindowTitle("YT Cut v1.0.16")
         self.resize(1060, 790)
         self.setMinimumSize(765, 630)
         self.duration = 0
@@ -973,15 +973,17 @@ QCheckBox { spacing:5px; }
 
 
 def self_check():
-    for path in (FFMPEG, FFPROBE, YTDLP, str(TOOLS / "node.exe"), str(TOOLS / "libmpv-2.dll")):
+    for path in (FFMPEG, FFPROBE, YTDLP, str(TOOLS / "node.exe"),
+                 str(TOOLS / "vulkan-1.dll"), str(TOOLS / "libmpv-2.dll")):
         if not Path(path).is_file():
             raise RuntimeError(f"Brak narzędzia: {path}")
         if path.endswith(".dll"):
             import ctypes
-            library = ctypes.CDLL(path)
-            library.mpv_client_api_version.restype = ctypes.c_ulong
-            if not library.mpv_client_api_version():
-                raise RuntimeError("libmpv API unavailable")
+            library = ctypes.WinDLL(path) if path.endswith("vulkan-1.dll") else ctypes.CDLL(path)
+            if path.endswith("libmpv-2.dll"):
+                library.mpv_client_api_version.restype = ctypes.c_ulong
+                if not library.mpv_client_api_version():
+                    raise RuntimeError("libmpv API unavailable")
             continue
         command = [path, "--version"] if path.endswith(("yt-dlp.exe", "node.exe")) else [path, "-version"]
         result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,

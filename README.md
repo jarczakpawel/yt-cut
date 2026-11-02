@@ -100,6 +100,9 @@ Windows distributions include third-party binaries, subject to their respective 
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp)
 - [Node.js](https://github.com/nodejs/node)
 - [mpv / libmpv](https://mpv.io/installation/) - Windows binary by [shinchiro](https://github.com/shinchiro/mpv-winbuild-cmake/releases)
+- [Vulkan-Loader](https://github.com/KhronosGroup/Vulkan-Loader) - bundled loader built from verified Khronos sources (Apache-2.0)
 - [Qt / PySide6](https://doc.qt.io/qtforpython-6/)
 
 On Windows, the player is embedded into a native Qt widget using libmpv's HWND embedding, initialized only after the window is shown. VP9/Opus and other supported formats play directly without making a converted proxy. The player writes `%LOCALAPPDATA%\YT-Cut\startup.log` before loading libmpv, so startup failures can be diagnosed even without an mpv.log. After initialization, mpv writes `%LOCALAPPDATA%\YT-Cut\mpv.log`. The original source is preserved for export and cropping.
+
+The Windows package bundles a pinned x64 `vulkan-1.dll` alongside `libmpv-2.dll`. Recent mpv builds import the Vulkan loader during DLL loading, even when playback uses another graphics API. The application loads its bundled dependency first to avoid relying on a GPU driver installation.

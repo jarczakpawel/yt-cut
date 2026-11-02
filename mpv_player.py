@@ -11,6 +11,7 @@ BASE = Path(getattr(__import__("sys"), "_MEIPASS", Path(__file__).resolve().pare
 DLL = BASE / "tools" / "libmpv-2.dll"
 if not DLL.is_file():
     DLL = BASE / "libmpv-2.dll"
+VULKAN = DLL.with_name("vulkan-1.dll")
 
 
 class VideoSurface(QWidget):
@@ -38,9 +39,11 @@ class MpvPlayer:
         self.startup_log = self.log_path.with_name("startup.log")
         self.startup_log.write_text(
             f"Starting embedded mpv\nDLL: {DLL}\nPresent: {DLL.is_file()}\n"
+            f"Vulkan loader: {VULKAN}\nVulkan present: {VULKAN.is_file()}\n"
             f"HWND: {self.hwnd}\n", encoding="utf-8")
         self._closed = False
         self._dll_directory = None
+        self._vulkan = None
         self.worker = threading.Thread(target=self._run, daemon=True)
         self.worker.start()
 
@@ -80,7 +83,10 @@ class MpvPlayer:
             if not DLL.is_file():
                 raise RuntimeError(f"Missing libmpv: {DLL}")
             if os.name == "nt":
+                if not VULKAN.is_file():
+                    raise RuntimeError(f"Missing bundled Vulkan loader: {VULKAN}")
                 self._dll_directory = os.add_dll_directory(str(DLL.parent))
+                self._vulkan = ctypes.WinDLL(str(VULKAN), winmode=0x1100)
             lib = ctypes.CDLL(str(DLL), **({"winmode": 0x1100} if os.name == "nt" else {}))
             lib.mpv_create.restype = ctypes.c_void_p
             lib.mpv_set_option_string.argtypes = (ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p)

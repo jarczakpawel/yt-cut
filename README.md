@@ -45,7 +45,7 @@ The Linux version embeds mpv in a GTK window, so it needs a running X11/XWayland
 - Preview only the selected interval, with optional looping
 - Export to **MP4 by default**, or select MP3 or WAV
 - Optionally fade audio in and/or out, with adjustable fade duration
-- **Crop video directly in the player** by dragging four corner handles or drawing a new selection
+- **Crop video directly in the player** by dragging four corner handles or drawing a new selection\n- **Responsive Windows UI** keeps the full crop preview in the player, moves crop controls below it and scrolls lower settings on small screens
 - Resize from **four round corner handles or any of the four edges**; the pointer changes to horizontal, vertical or diagonal resize cursors
 - Drag inside the selected crop to reposition it; adjust X/Y/width/height in pixels or choose an aspect ratio (16:9, 9:16, 1:1, 4:3, 3:4)
 - Crop boundaries are mapped to source pixels, with even output dimensions for H.264 and unmodified audio

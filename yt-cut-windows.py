@@ -20,7 +20,7 @@ from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QApplication, QWidget, QMainWindow, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QComboBox, QCheckBox, QDoubleSpinBox, QProgressBar,
-    QFrame, QStackedWidget,
+    QFrame, QStackedWidget, QScrollArea, QSizePolicy,
 )
 
 BASE = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -168,9 +168,9 @@ class Timeline(QWidget):
 class Window(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("YT Cut v1.0.16")
-        self.resize(1060, 790)
-        self.setMinimumSize(765, 630)
+        self.setWindowTitle("YT Cut v1.0.18")
+        self.resize(1060, 750)
+        self.setMinimumSize(640, 420)
         self.duration = 0
         self.start = 0
         self.end = 0
@@ -203,11 +203,17 @@ class Window(QMainWindow):
         self.signals.failed.connect(self.on_failed)
         self.signals.exported.connect(self.on_exported)
 
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setCentralWidget(self.scroll)
         center = QWidget()
-        self.setCentralWidget(center)
+        self.scroll.setWidget(center)
         main = QVBoxLayout(center)
-        main.setContentsMargins(20, 20, 20, 20)
-        main.setSpacing(12)
+        main.setContentsMargins(16, 12, 16, 12)
+        main.setSpacing(8)
+        self.content_layout = main
 
         urlrow = QHBoxLayout()
         self.url = QLineEdit()
@@ -262,8 +268,11 @@ class Window(QMainWindow):
         self.video = VideoSurface()
         self.video_stack = QStackedWidget()
         self.video_stack.addWidget(self.video)
+        self.video_stack.setMinimumHeight(290)
+        self.video_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.crop_panel = None
         main.addWidget(self.video_stack, 1)
+        self.crop_toolbar_index = main.count()
         self.player = None
 
         controls = QHBoxLayout()
@@ -361,11 +370,16 @@ class Window(QMainWindow):
         self.timer.timeout.connect(self.tick)
         self.timer.start(30)
         self.setStyleSheet("""
-QMainWindow { background:#161920; }
+QMainWindow,QScrollArea { background:#161920; }
 QWidget { color:#ebedf2; font-size:13px; }
+QScrollBar:vertical { background:#1c212a; width:10px; margin:0; }
+QScrollBar::handle:vertical { background:#46505f; border-radius:5px; min-height:35px; }
+QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical { height:0; }
 QLabel#subtle { color:#a4adbc; }
 QLabel#clock { font-family:Consolas, monospace; font-size:14px; font-weight:600; }
 QLineEdit,QComboBox,QDoubleSpinBox { background:#242a34; border:1px solid #424a58; padding:8px; border-radius:7px; min-height:21px; }
+QSpinBox { background:#242a34; color:#ebedf2; border:1px solid #424a58; padding:3px; border-radius:6px; min-height:22px; }
+QWidget#cropTools { background:#20252e; border:1px solid #343c47; border-radius:7px; }
 QLineEdit:focus { border-color:#ed5a54; }
 QPushButton { background:#2b313c; border:1px solid #414956; border-radius:7px; padding:9px 13px; }
 QPushButton:hover { background:#3a414e; }
@@ -824,6 +838,8 @@ QCheckBox { spacing:5px; }
     def close_crop(self):
         if self.crop_panel is not None:
             self.video_stack.setCurrentWidget(self.video)
+            self.content_layout.removeWidget(self.crop_panel.toolbar)
+            self.crop_panel.toolbar.deleteLater()
             self.video_stack.removeWidget(self.crop_panel)
             self.crop_panel.deleteLater()
             self.crop_panel = None
@@ -855,7 +871,10 @@ QCheckBox { spacing:5px; }
                 raise RuntimeError(output.stderr[-350:] or "Brak klatki filmu")
             self.crop_panel = CropPanel(image, self.crop_rect, self.finish_crop, self.close_crop)
             self.video_stack.addWidget(self.crop_panel)
+            self.content_layout.insertWidget(self.crop_toolbar_index, self.crop_panel.toolbar)
+            self.crop_panel.toolbar.show()
             self.video_stack.setCurrentWidget(self.crop_panel)
+            QTimer.singleShot(0, lambda: self.scroll.ensureWidgetVisible(self.video_stack, 0, 0))
             self.crop_button.setEnabled(False)
             self.crop_reset.setVisible(True)
             for widget in (self.play_button, self.back_button, self.next_button, self.restart_button):
@@ -1036,10 +1055,29 @@ def media_check():
             position = window.player.position()
             window.player.pause()
             window.player.setPosition(750)
+            window.directory = directory
+            window.resize(900, 600)
             app.processEvents()
+            window.open_crop()
+            app.processEvents()
+            if window.crop_panel is None:
+                raise RuntimeError(f"Crop panel did not open: {window.status.text()}")
+            if window.video_stack.height() < 290 or window.crop_panel.canvas.height() < 230:
+                raise RuntimeError(
+                    f"Crop preview too small: stack={window.video_stack.height()}, "
+                    f"canvas={window.crop_panel.canvas.height()}")
+            if window.crop_panel.toolbar.parentWidget() is not window.scroll.widget():
+                raise RuntimeError("Crop controls must be outside video viewport")
+            if window.scroll.verticalScrollBar().maximum() < 1:
+                raise RuntimeError("Low-resolution window cannot scroll lower controls")
+            window.crop_panel.set_crop((22, 36, 240, 420))
+            window.finish_crop(window.crop_panel.crop)
+            if window.crop_rect != (22, 36, 240, 420) or window.crop_panel is not None:
+                raise RuntimeError("Cropping did not return to video with selected coordinates")
             window.close()
             log.write_text(
-                f"PASS: actual YT Cut window, embedded VP9/Opus playback position={position} ms\n",
+                f"PASS: embedded VP9/Opus playback={position} ms, "
+                "responsive 900x600 crop viewport, separate tools and scroll support\n",
                 encoding="utf-8")
     except Exception:
         import traceback

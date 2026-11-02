@@ -14,12 +14,13 @@ class CropCanvas(QWidget):
         self.mode = None
         self.anchor = None
         self.original = None
-        self.setMinimumSize(380, 190)
+        self.setMinimumSize(260, 230)
         self.setMouseTracking(True)
 
     def scale_info(self):
         d = self.dialog
-        scale = min(self.width() / d.width, self.height() / d.height)
+        scale = min(max(1, self.width() - 24) / d.width,
+                    max(1, self.height() - 24) / d.height)
         return ((self.width() - d.width * scale) / 2,
                 (self.height() - d.height * scale) / 2, scale)
 
@@ -132,44 +133,59 @@ class CropPanel(QWidget):
                                self.width, self.height)
         self.editing = False
         main = QVBoxLayout(self)
-        main.setContentsMargins(5, 5, 5, 5)
-        main.setSpacing(4)
+        main.setContentsMargins(0, 0, 0, 0)
         self.canvas = CropCanvas(self)
-        main.addWidget(self.canvas, 1)
-        row = QHBoxLayout()
-        main.addLayout(row)
-        row.addWidget(QLabel("Proporcje"))
+        main.addWidget(self.canvas)
+
+        self.toolbar = QWidget()
+        self.toolbar.setObjectName("cropTools")
+        tools = QVBoxLayout(self.toolbar)
+        tools.setContentsMargins(8, 4, 8, 4)
+        tools.setSpacing(4)
+
+        top = QHBoxLayout()
+        tools.addLayout(top)
+        top.addWidget(QLabel("Proporcje"))
         self.ratios = QComboBox()
         for label, ratio in (("Dowolne", None), ("16:9", 16 / 9), ("9:16", 9 / 16),
                              ("1:1", 1), ("4:3", 4 / 3), ("3:4", 3 / 4)):
             self.ratios.addItem(label, ratio)
-        row.addWidget(self.ratios)
+        self.ratios.setFixedWidth(105)
+        top.addWidget(self.ratios)
+
         self.fields = []
         for label, maximum in (("X", self.width), ("Y", self.height),
                                ("Szer.", self.width), ("Wys.", self.height)):
-            row.addWidget(QLabel(label))
             spin = QSpinBox()
             spin.setRange(0, maximum)
-            spin.setMinimumWidth(65)
+            spin.setFixedWidth(85)
             spin.valueChanged.connect(self.field_changed)
-            row.addWidget(spin)
             self.fields.append(spin)
-        self.ratios.currentIndexChanged.connect(self.ratio_changed)
-        buttons = QHBoxLayout()
-        main.addLayout(buttons)
+        for name, field in zip(("X", "Y"), self.fields[:2]):
+            top.addWidget(QLabel(name))
+            top.addWidget(field)
+        top.addStretch()
         self.info = QLabel()
-        buttons.addWidget(self.info)
-        buttons.addStretch()
+        top.addWidget(self.info)
+
+        bottom = QHBoxLayout()
+        tools.addLayout(bottom)
+        for name, field in zip(("Szer.", "Wys."), self.fields[2:]):
+            bottom.addWidget(QLabel(name))
+            bottom.addWidget(field)
+        bottom.addStretch()
         cancel = QPushButton("Anuluj")
         cancel.clicked.connect(cancelled)
-        buttons.addWidget(cancel)
+        bottom.addWidget(cancel)
         reset = QPushButton("Resetuj")
-        reset.clicked.connect(lambda: self.applied(None))
-        buttons.addWidget(reset)
+        reset.clicked.connect(lambda: self.set_crop((0, 0, self.width, self.height)))
+        bottom.addWidget(reset)
         save = QPushButton("Zastosuj kadr")
         save.clicked.connect(lambda: self.applied(
             None if self.crop == (0, 0, self.width, self.height) else self.crop))
-        buttons.addWidget(save)
+        bottom.addWidget(save)
+
+        self.ratios.currentIndexChanged.connect(self.ratio_changed)
         self.set_crop(self.crop)
 
     def aspect(self):
@@ -190,5 +206,5 @@ class CropPanel(QWidget):
         for field, value in zip(self.fields, self.crop):
             field.setValue(value)
         self.editing = False
-        self.info.setText(f"{self.crop[2]} x {self.crop[3]} px")
+        self.info.setText(f"Obraz: {self.width} x {self.height}  |  Kadr: {self.crop[2]} x {self.crop[3]}")
         self.canvas.update()

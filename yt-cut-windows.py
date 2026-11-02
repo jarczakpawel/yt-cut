@@ -264,7 +264,7 @@ class Window(QMainWindow):
         self.video_stack.addWidget(self.video)
         self.crop_panel = None
         main.addWidget(self.video_stack, 1)
-        self.player = MpvPlayer(self.video)
+        self.player = None
 
         controls = QHBoxLayout()
         self.play_button = QPushButton("▶  Odtwórz")
@@ -280,6 +280,13 @@ class Window(QMainWindow):
         self.restart_button = QPushButton("↺ Od START")
         self.restart_button.clicked.connect(self.restart)
         controls.addWidget(self.restart_button)
+        self.crop_button = QPushButton("Kadruj obraz")
+        self.crop_button.clicked.connect(self.open_crop)
+        controls.addWidget(self.crop_button)
+        self.crop_reset = QPushButton("Resetuj kadr")
+        self.crop_reset.clicked.connect(self.reset_crop)
+        self.crop_reset.setVisible(False)
+        controls.addWidget(self.crop_reset)
         controls.addStretch()
         self.position_text = QLabel(f"{clock(0)} / {clock(0)}")
         self.position_text.setObjectName("clock")
@@ -340,18 +347,6 @@ class Window(QMainWindow):
         settings.addStretch()
         main.addLayout(settings)
 
-        crop_row = QHBoxLayout()
-        self.crop_button = QPushButton("Kadruj obraz")
-        self.crop_button.clicked.connect(self.open_crop)
-        crop_row.addWidget(self.crop_button)
-        self.crop_reset = QPushButton("Resetuj kadr")
-        self.crop_reset.clicked.connect(self.reset_crop)
-        crop_row.addWidget(self.crop_reset)
-        self.crop_status = QLabel("Kadrowanie: wyłączone")
-        crop_row.addWidget(self.crop_status)
-        crop_row.addStretch()
-        main.addLayout(crop_row)
-
         foot = QHBoxLayout()
         self.status = QLabel("Gotowy. Wklej link do YouTube.")
         self.status.setWordWrap(True)
@@ -399,7 +394,8 @@ QCheckBox { spacing:5px; }
     def update_enabled(self):
         ready = self.media is not None
         self.crop_button.setEnabled(ready)
-        self.crop_reset.setEnabled(ready and self.crop_rect is not None)
+        self.crop_reset.setEnabled(ready)
+        self.crop_reset.setVisible(self.crop_rect is not None or self.crop_panel is not None)
         for widget in (self.play_button, self.back_button, self.next_button, self.restart_button,
                        self.mark_start_button, self.mark_end_button, self.start_edit, self.end_edit):
             widget.setEnabled(ready)
@@ -423,12 +419,20 @@ QCheckBox { spacing:5px; }
             self.timeline.update()
 
     def tick(self):
+        if self.player is None:
+            return
         if self.player.error:
             error = self.player.error
             self.player.error = ""
             self.status.setText(f"Błąd silnika mpv: {error}")
         if self.media and self.player.playbackState() == MpvPlayer.PlayingState:
             self.position_changed(self.player.position())
+            if self.player.position() == 0 and time.monotonic() - getattr(self, "play_requested_at", time.monotonic()) > 5:
+                state = self.player.state
+                self.status.setText(
+                    f"mpv: brak postępu | gotowy={self.player.ready} | "
+                    f"pause={state.get('pause')} | idle={state.get('core-idle')} | "
+                    f"video={state.get('vo-configured')} | log: {self.player.log_path}")
         if self.is_downloading and self.download_has_percent and int(time.monotonic()) != self.progress_display_at:
             now = time.monotonic()
             elapsed = now - self.progress_first_at
@@ -479,6 +483,7 @@ QCheckBox { spacing:5px; }
                 start = self.start
             self.seek(start)
             self.player.play()
+            self.play_requested_at = time.monotonic()
             self.play_button.setText("⏸  Pauza")
 
     def frame_step(self, direction):
@@ -496,6 +501,7 @@ QCheckBox { spacing:5px; }
         self.anchor = self.start if self.selection.isChecked() else 0
         self.seek(self.anchor)
         self.player.play()
+        self.play_requested_at = time.monotonic()
         self.play_button.setText("⏸  Pauza")
 
     def edit_time(self, kind):
@@ -799,13 +805,16 @@ QCheckBox { spacing:5px; }
     def update_crop_status(self):
         if self.crop_rect:
             x, y, width, height = self.crop_rect
-            self.crop_status.setText(f"Kadr: {width} x {height} px  |  X={x}  Y={y}")
+            self.crop_button.setToolTip(f"Kadr: {width} x {height} px | X={x} Y={y}")
         else:
-            self.crop_status.setText("Kadrowanie: wyłączone")
-        self.crop_reset.setEnabled(self.crop_rect is not None)
+            self.crop_button.setToolTip("Kadrowanie: wyłączone")
+        self.crop_reset.setEnabled(bool(self.media))
+        self.crop_reset.setVisible(self.crop_rect is not None or self.crop_panel is not None)
 
     def reset_crop(self):
         self.crop_rect = None
+        if self.crop_panel is not None:
+            self.crop_panel.set_crop((0, 0, self.crop_panel.width, self.crop_panel.height))
         self.update_crop_status()
 
     def close_crop(self):
@@ -844,6 +853,7 @@ QCheckBox { spacing:5px; }
             self.video_stack.addWidget(self.crop_panel)
             self.video_stack.setCurrentWidget(self.crop_panel)
             self.crop_button.setEnabled(False)
+            self.crop_reset.setVisible(True)
             for widget in (self.play_button, self.back_button, self.next_button, self.restart_button):
                 widget.setEnabled(False)
         except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
@@ -992,30 +1002,39 @@ def media_check():
             if converted.returncode:
                 raise RuntimeError(converted.stderr[-1200:])
             app = QApplication([])
-            surface = VideoSurface()
-            surface.resize(600, 400)
-            surface.show()
-            player = MpvPlayer(surface)
+            window = Window()
+            window.resize(1000, 760)
+            window.show()
+            app.processEvents()
+            window.player = MpvPlayer(window.video)
             deadline = time.monotonic() + 10
-            while not player.ready and not player.error and time.monotonic() < deadline:
+            while not window.player.ready and not window.player.error and time.monotonic() < deadline:
                 app.processEvents()
                 time.sleep(.025)
-            if not player.ready:
-                raise RuntimeError(f"mpv startup: {player.error}")
-            player.setSource(video)
-            player.play()
+            if not window.player.ready:
+                raise RuntimeError(f"mpv startup in actual Window: {window.player.error}")
+            window.media = video
+            window.duration = 2000
+            window.end = 2000
+            window.update_enabled()
+            window.player.setSource(video)
+            window.player.play()
             deadline = time.monotonic() + 12
-            while player.position() < 400 and not player.error and time.monotonic() < deadline:
+            while window.player.position() < 400 and not window.player.error and time.monotonic() < deadline:
                 app.processEvents()
                 time.sleep(.03)
-            if player.position() < 400:
-                raise RuntimeError(f"mpv VP9/Opus playback failed, position={player.position()}, error={player.error}")
-            player.pause()
-            player.setPosition(750)
+            if window.player.position() < 400:
+                raise RuntimeError(
+                    f"Actual-window playback failed: position={window.player.position()}, "
+                    f"state={window.player.state}, error={window.player.error}")
+            position = window.player.position()
+            window.player.pause()
+            window.player.setPosition(750)
             app.processEvents()
-            player.close()
-            surface.close()
-            log.write_text("PASS: embedded libmpv initialization and VP9/Opus playback\n", encoding="utf-8")
+            window.close()
+            log.write_text(
+                f"PASS: actual YT Cut window, embedded VP9/Opus playback position={position} ms\n",
+                encoding="utf-8")
     except Exception:
         import traceback
         log.write_text(traceback.format_exc(), encoding="utf-8")
@@ -1145,5 +1164,6 @@ if __name__ == "__main__":
         app.setApplicationName("YT Cut")
         window = Window()
         window.show()
+        window.player = MpvPlayer(window.video)
         sys.exit(app.exec())
 

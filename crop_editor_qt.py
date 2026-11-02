@@ -1,12 +1,10 @@
-import math
-
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QComboBox,
                                QHBoxLayout, QLabel, QPushButton, QSpinBox,
                                QVBoxLayout, QWidget)
 
-from crop_geometry import clamp_crop, drag_crop, fit_aspect
+from crop_geometry import clamp_crop, drag_crop, drag_crop_edge, crop_hit, fit_aspect
 
 
 class CropCanvas(QWidget):
@@ -62,45 +60,62 @@ class CropCanvas(QWidget):
                 p.drawEllipse(QRectF(ox+cx*scale-7, oy+cy*scale-7, 14, 14))
         p.end()
 
+    def interaction(self, position):
+        px, py = self.coordinates(position)
+        _, _, scale = self.scale_info()
+        hit = crop_hit(self.dialog.crop, px, py, 10 / scale)
+        if hit == "move" and self.dialog.crop == (0, 0, self.dialog.width, self.dialog.height):
+            return "new"
+        return hit
+
     def mousePressEvent(self, event):
         if event.button() != Qt.LeftButton:
             return
-        d = self.dialog
+        self.mode = self.interaction(event.position())
         px, py = self.coordinates(event.position())
+        d = self.dialog
         x, y, w, h = d.crop
-        _, _, scale = self.scale_info()
-        corners = ((x, y, (x+w,y+h)), (x+w, y, (x,y+h)),
-                   (x,y+h,(x+w,y)), (x+w,y+h,(x,y)))
-        close = next((corner for corner in corners
-                      if math.hypot(px-corner[0], py-corner[1]) < 14/scale), None)
-        if close:
-            self.mode = "resize"
-            self.anchor = close[2]
-        elif x < px < x+w and y < py < y+h:
-            self.mode = "move"
-            self.anchor = (px,py)
-            self.original = d.crop
-        else:
-            self.mode = "new"
-            self.anchor = (px,py)
+        opposite = {
+            "nw": (x + w, y + h), "ne": (x, y + h),
+            "sw": (x + w, y), "se": (x, y),
+        }
+        self.original = d.crop
+        self.anchor = opposite.get(self.mode, (px, py))
 
     def mouseMoveEvent(self, event):
-        if not self.mode:
-            return
         d = self.dialog
         px, py = self.coordinates(event.position())
+        if not self.mode:
+            cursor = {
+                "nw": Qt.SizeFDiagCursor, "se": Qt.SizeFDiagCursor,
+                "ne": Qt.SizeBDiagCursor, "sw": Qt.SizeBDiagCursor,
+                "w": Qt.SizeHorCursor, "e": Qt.SizeHorCursor,
+                "n": Qt.SizeVerCursor, "s": Qt.SizeVerCursor,
+                "move": Qt.SizeAllCursor, "new": Qt.CrossCursor,
+            }[self.interaction(event.position())]
+            self.setCursor(cursor)
+            return
         if self.mode == "move":
             x, y, w, h = self.original
-            x = max(0, min(d.width-w, x+px-self.anchor[0]))
-            y = max(0, min(d.height-h, y+py-self.anchor[1]))
+            x = max(0, min(d.width - w, x + px - self.anchor[0]))
+            y = max(0, min(d.height - h, y + py - self.anchor[1]))
             d.set_crop((round(x), round(y), w, h))
+        elif self.mode in ("w", "e", "n", "s"):
+            d.set_crop(drag_crop_edge(self.original, self.mode, px, py,
+                                      d.width, d.height, d.aspect()))
         else:
-            d.set_crop(drag_crop(self.anchor, (px,py), d.width, d.height, d.aspect()))
+            d.set_crop(drag_crop(self.anchor, (px, py), d.width, d.height, d.aspect()))
 
     def mouseReleaseEvent(self, event):
         if self.mode:
             self.mouseMoveEvent(event)
             self.mode = None
+            self.mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        if not self.mode:
+            self.unsetCursor()
+        super().leaveEvent(event)
 
 
 class CropPanel(QWidget):

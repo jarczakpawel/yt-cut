@@ -26,12 +26,15 @@ class MpvPlayer:
     PausedState = 2
 
     def __init__(self, widget):
-        self.hwnd = int(widget.winId()) & 0xFFFFFFFF
+        self.hwnd = int(widget.winId())
         self.actions = queue.Queue()
         self._position = 0
         self._playing = False
         self.error = ""
         self.ready = False
+        self.state = {}
+        self.log_path = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "YT-Cut" / "mpv.log"
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._closed = False
         self.worker = threading.Thread(target=self._run, daemon=True)
         self.worker.start()
@@ -84,6 +87,8 @@ class MpvPlayer:
             lib.mpv_get_property.argtypes = (ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int, ctypes.c_void_p)
             lib.mpv_get_property.restype = ctypes.c_int
             lib.mpv_terminate_destroy.argtypes = (ctypes.c_void_p,)
+            lib.mpv_error_string.argtypes = (ctypes.c_int,)
+            lib.mpv_error_string.restype = ctypes.c_char_p
             handle = lib.mpv_create()
             if not handle:
                 raise RuntimeError("mpv_create failed")
@@ -99,6 +104,8 @@ class MpvPlayer:
                     "input-default-bindings": "no",
                     "terminal": "no",
                     "hwdec": "auto-safe",
+                    "log-file": str(self.log_path),
+                    "msg-level": "all=info,vo=debug",
                 }
                 for key, value in options.items():
                     if lib.mpv_set_option_string(handle, key.encode(), value.encode()) < 0:
@@ -110,7 +117,11 @@ class MpvPlayer:
                 def command(*values):
                     arguments = (ctypes.c_char_p * (len(values) + 1))(
                         *(str(value).encode("utf-8") for value in values), None)
-                    return lib.mpv_command(handle, arguments)
+                    result = lib.mpv_command(handle, arguments)
+                    if result < 0:
+                        message = lib.mpv_error_string(result)
+                        self.error = f"{values[0]}: {message.decode('utf-8', errors='replace') if message else result}"
+                    return result
 
                 while not self._closed:
                     try:
@@ -138,10 +149,15 @@ class MpvPlayer:
                                 break
                     except queue.Empty:
                         pass
-                    if self._playing:
-                        position = ctypes.c_double()
-                        if lib.mpv_get_property(handle, b"time-pos", 5, ctypes.byref(position)) >= 0:
-                            self._position = max(0, round(position.value * 1000))
+                    position = ctypes.c_double()
+                    if lib.mpv_get_property(handle, b"time-pos", 5, ctypes.byref(position)) >= 0:
+                        self._position = max(0, round(position.value * 1000))
+                    props = {}
+                    for name in (b"pause", b"core-idle", b"vo-configured"):
+                        flag = ctypes.c_int()
+                        if lib.mpv_get_property(handle, name, 3, ctypes.byref(flag)) >= 0:
+                            props[name.decode()] = bool(flag.value)
+                    self.state = props
             finally:
                 lib.mpv_terminate_destroy(handle)
         except Exception as exc:

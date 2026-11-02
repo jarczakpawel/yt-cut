@@ -46,7 +46,8 @@ The Linux version embeds mpv in a GTK window, so it needs a running X11/XWayland
 - Export to **MP4 by default**, or select MP3 or WAV
 - Optionally fade audio in and/or out, with adjustable fade duration
 - **Crop video directly in the player** by dragging four corner handles or drawing a new selection
-- Drag inside the crop rectangle to reposition it, adjust X/Y/width/height in pixels, or choose an aspect ratio (16:9, 9:16, 1:1, 4:3, 3:4)
+- Resize from **four round corner handles or any of the four edges**; the pointer changes to horizontal, vertical or diagonal resize cursors
+- Drag inside the selected crop to reposition it; adjust X/Y/width/height in pixels or choose an aspect ratio (16:9, 9:16, 1:1, 4:3, 3:4)
 - Crop boundaries are mapped to source pixels, with even output dimensions for H.264 and unmodified audio
 - Automatically name output files `cut1.mp4`, `cut2.mp3`, and so on
 - Save exported files in **Downloads**
@@ -58,7 +59,7 @@ The Linux version embeds mpv in a GTK window, so it needs a running X11/XWayland
 2. To download only part of a long video, enable **Download only a fragment** under the URL, enter **FROM** and **TO**, then start the download. Otherwise the entire video is downloaded. The preview timeline starts at zero for the downloaded fragment.
 3. Click the timeline to select a position (yellow marker). The white indicator shows the current playback position.
 4. Use **Set START from point** and **Set END from point**, drag the red markers, or enter timestamps directly.
-5. Optionally select **Crop video** to edit a crop directly over the paused frame inside the player. Choose **Apply crop** or **Cancel** to return to the video. Cropping only affects MP4.
+5. Optionally select **Crop video** next to the playback and frame-step controls below the player. Draw or resize the crop directly over the paused frame, then choose **Apply crop** or **Cancel**. **Reset crop** appears only while cropping or when a crop has been applied. Cropping only affects MP4.
 6. Select the output format and optional audio fades.
 7. Choose **Cut and save**. The exported file appears in your Downloads directory.
 
@@ -101,4 +102,4 @@ Windows distributions include third-party binaries, subject to their respective 
 - [mpv / libmpv](https://mpv.io/installation/) - Windows binary by [shinchiro](https://github.com/shinchiro/mpv-winbuild-cmake/releases)
 - [Qt / PySide6](https://doc.qt.io/qtforpython-6/)
 
-On Windows, the player is embedded into a native Qt widget using libmpv's HWND embedding. VP9/Opus and other supported formats play directly without making a converted proxy. The original source is preserved for export and cropping.
+On Windows, the player is embedded into a native Qt widget using libmpv's HWND embedding, initialized only after the window is shown. VP9/Opus and other supported formats play directly without making a converted proxy. mpv diagnostics are saved under `%LOCALAPPDATA%\YT-Cut\mpv.log`. The original source is preserved for export and cropping.

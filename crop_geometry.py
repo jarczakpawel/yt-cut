@@ -37,3 +37,56 @@ def fit_aspect(crop, source_width, source_height, aspect):
 def ffmpeg_crop(crop):
     x, y, width, height = crop
     return f"scale=trunc(iw*sar/2)*2:ih,setsar=1,crop={width}:{height}:{x}:{y}:exact=1"
+
+
+def crop_hit(crop, px, py, tolerance):
+    x, y, w, h = crop
+    corners = (
+        ("nw", x, y), ("ne", x + w, y),
+        ("sw", x, y + h), ("se", x + w, y + h),
+    )
+    for name, cx, cy in corners:
+        if abs(px - cx) <= tolerance and abs(py - cy) <= tolerance:
+            return name
+    if x - tolerance <= px <= x + w + tolerance:
+        if abs(py - y) <= tolerance:
+            return "n"
+        if abs(py - (y + h)) <= tolerance:
+            return "s"
+    if y - tolerance <= py <= y + h + tolerance:
+        if abs(px - x) <= tolerance:
+            return "w"
+        if abs(px - (x + w)) <= tolerance:
+            return "e"
+    if x < px < x + w and y < py < y + h:
+        return "move"
+    return "new"
+
+
+def drag_crop_edge(crop, edge, px, py, source_width, source_height, aspect=None):
+    x, y, w, h = crop
+    right, bottom = x + w, y + h
+    if edge == "w":
+        x = max(0, min(right - 2, round(px)))
+        w = right - x
+    elif edge == "e":
+        w = max(2, min(source_width, round(px)) - x)
+    elif edge == "n":
+        y = max(0, min(bottom - 2, round(py)))
+        h = bottom - y
+    elif edge == "s":
+        h = max(2, min(source_height, round(py)) - y)
+    if aspect:
+        if edge in ("w", "e"):
+            center = y + h / 2
+            h = min(w / aspect, source_height, 2 * center, 2 * (source_height - center))
+            w = h * aspect
+            x = right - w if edge == "w" else x
+            y = center - h / 2
+        else:
+            center = x + w / 2
+            w = min(h * aspect, source_width, 2 * center, 2 * (source_width - center))
+            h = w / aspect
+            x = center - w / 2
+            y = bottom - h if edge == "n" else y
+    return clamp_crop(x, y, w, h, source_width, source_height)

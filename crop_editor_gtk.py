@@ -4,7 +4,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk, GdkPixbuf, Gtk
 
-from crop_geometry import clamp_crop, drag_crop, fit_aspect
+from crop_geometry import clamp_crop, drag_crop, drag_crop_edge, crop_hit, fit_aspect
 
 
 class CropCanvas(Gtk.DrawingArea):
@@ -70,39 +70,56 @@ class CropCanvas(Gtk.DrawingArea):
         ctx.restore()
         return False
 
+    def interaction(self, x, y):
+        px, py = self.coordinates(x, y)
+        _, _, scale = self.scale_info()
+        hit = crop_hit(self.dialog.crop, px, py, 10 / scale)
+        if hit == "move" and self.dialog.crop == (0, 0, self.dialog.width, self.dialog.height):
+            return "new"
+        return hit
+
+    def update_cursor(self, x, y):
+        window = self.get_window()
+        if not window:
+            return
+        name = {
+            "nw": "nwse-resize", "se": "nwse-resize",
+            "ne": "nesw-resize", "sw": "nesw-resize",
+            "w": "ew-resize", "e": "ew-resize",
+            "n": "ns-resize", "s": "ns-resize",
+            "move": "move", "new": "crosshair",
+        }[self.interaction(x, y)]
+        window.set_cursor(Gdk.Cursor.new_from_name(window.get_display(), name))
+
     def press(self, widget, event):
         if event.button != 1:
             return False
         d = self.dialog
         px, py = self.coordinates(event.x, event.y)
+        self.mode = self.interaction(event.x, event.y)
         x, y, w, h = d.crop
-        _, _, scale = self.scale_info()
-        corners = ((x, y, (x+w, y+h)), (x+w, y, (x, y+h)),
-                   (x, y+h, (x+w, y)), (x+w, y+h, (x, y)))
-        close = next((corner for corner in corners
-                      if math.hypot(px-corner[0], py-corner[1]) < 14 / scale), None)
-        if close:
-            self.mode = "resize"
-            self.anchor = close[2]
-        elif x < px < x + w and y < py < y + h:
-            self.mode = "move"
-            self.anchor = (px, py)
-            self.original = d.crop
-        else:
-            self.mode = "new"
-            self.anchor = (px, py)
+        opposite = {
+            "nw": (x + w, y + h), "ne": (x, y + h),
+            "sw": (x + w, y), "se": (x, y),
+        }
+        self.original = d.crop
+        self.anchor = opposite.get(self.mode, (px, py))
         return True
 
     def motion(self, widget, event):
         if not self.mode:
+            self.update_cursor(event.x, event.y)
             return False
         d = self.dialog
         px, py = self.coordinates(event.x, event.y)
         if self.mode == "move":
             x, y, w, h = self.original
-            x = max(0, min(d.width-w, x + px-self.anchor[0]))
-            y = max(0, min(d.height-h, y + py-self.anchor[1]))
+            x = max(0, min(d.width - w, x + px - self.anchor[0]))
+            y = max(0, min(d.height - h, y + py - self.anchor[1]))
             d.set_crop((round(x), round(y), w, h))
+        elif self.mode in ("w", "e", "n", "s"):
+            d.set_crop(drag_crop_edge(self.original, self.mode, px, py,
+                                      d.width, d.height, d.aspect()))
         else:
             d.set_crop(drag_crop(self.anchor, (px, py), d.width, d.height, d.aspect()))
         return True
@@ -111,6 +128,7 @@ class CropCanvas(Gtk.DrawingArea):
         if self.mode:
             self.motion(widget, event)
             self.mode = None
+            self.update_cursor(event.x, event.y)
         return True
 
 

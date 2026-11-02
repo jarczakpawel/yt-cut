@@ -8,6 +8,8 @@ $source = Get-ChildItem $env:TEMP -Directory -Filter "yt-cut-*" -ErrorAction Sil
     ForEach-Object { Get-Item (Join-Path $_.FullName "source.mkv") -ErrorAction SilentlyContinue } |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if (!(Test-Path $dll)) { throw "Missing DLL: $dll" }
+if (-not [Environment]::Is64BitProcess) { throw "Requires 64-bit PowerShell to load x64 libmpv" }
+$env:PATH = (Split-Path $dll) + ";" + (Join-Path $root "_internal") + ";" + $env:PATH
 if (!$source) { throw "No source.mkv found. Download the video again without closing YT Cut." }
 
 Add-Type -TypeDefinition @'
@@ -17,6 +19,8 @@ using System.Text;
 public static class MpvDiagnostic {
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode)]
     public static extern bool SetDllDirectory(string path);
+    [DllImport("kernel32.dll", EntryPoint="LoadLibraryExW", CharSet=CharSet.Unicode, SetLastError=true)]
+    public static extern IntPtr LoadLibraryEx(string filename, IntPtr reserved, uint flags);
     [DllImport("libmpv-2.dll", CallingConvention=CallingConvention.Cdecl)]
     public static extern IntPtr mpv_create();
     [DllImport("libmpv-2.dll", CallingConvention=CallingConvention.Cdecl, CharSet=CharSet.Ansi)]
@@ -62,6 +66,12 @@ public static class MpvDiagnostic {
 '@
 
 [void][MpvDiagnostic]::SetDllDirectory((Split-Path $dll))
+$loaded = [MpvDiagnostic]::LoadLibraryEx($dll, [IntPtr]::Zero, 0x1100)
+if ($loaded -eq [IntPtr]::Zero) {
+    $code = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    throw "Windows loader cannot load libmpv with its dependencies: Win32 $code. Check missing dependent DLLs in _internal."
+}
+Write-Host "LOADLIBRARYEX: OK, handle=$loaded"
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "YT Cut - libmpv diagnostics"
 $form.Size = New-Object System.Drawing.Size(850,580)

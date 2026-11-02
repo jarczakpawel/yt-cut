@@ -343,6 +343,13 @@ class YTCut(Gtk.Window):
         jump.set_sensitive(False)
         controls.pack_start(jump, False, False, 0)
         self.jump_btn = jump
+        self.crop_btn = self.button("Kadruj obraz", self.open_crop)
+        self.crop_btn.set_sensitive(False)
+        controls.pack_start(self.crop_btn, False, False, 0)
+        self.crop_reset = self.button("Resetuj kadr", self.reset_crop)
+        self.crop_reset.set_no_show_all(True)
+        self.crop_reset.hide()
+        controls.pack_start(self.crop_reset, False, False, 0)
         controls.pack_start(Gtk.Label(label=""), True, True, 0)
         self.position_label = Gtk.Label(label="00:00:00.000 / 00:00:00.000")
         self.position_label.get_style_context().add_class("clock")
@@ -405,18 +412,6 @@ class YTCut(Gtk.Window):
         self.fade_seconds.set_digits(1)
         settings.pack_start(self.fade_seconds, False, False, 0)
         settings.pack_start(Gtk.Label(label="s"), False, False, 0)
-
-        crop_row = Gtk.Box(spacing=10)
-        outer.pack_start(crop_row, False, False, 0)
-        self.crop_btn = self.button("Kadruj obraz", self.open_crop)
-        self.crop_btn.set_sensitive(False)
-        crop_row.pack_start(self.crop_btn, False, False, 0)
-        self.crop_reset = self.button("Resetuj kadr", self.reset_crop)
-        self.crop_reset.set_sensitive(False)
-        crop_row.pack_start(self.crop_reset, False, False, 0)
-        self.crop_status = Gtk.Label(label="Kadrowanie: wyłączone")
-        self.crop_status.set_xalign(0)
-        crop_row.pack_start(self.crop_status, True, True, 0)
 
         bottom = Gtk.Box(spacing=12)
         outer.pack_start(bottom, False, False, 0)
@@ -943,15 +938,17 @@ class YTCut(Gtk.Window):
         self.status.set_text("Anulowano pobieranie.")
 
     def update_crop_status(self):
-        self.crop_reset.set_sensitive(self.crop_rect is not None)
+        self.crop_reset.set_visible(self.crop_rect is not None or self.crop_panel is not None)
         if self.crop_rect:
             x, y, width, height = self.crop_rect
-            self.crop_status.set_text(f"Kadr: {width} x {height} px  |  X={x}  Y={y}")
+            self.crop_btn.set_tooltip_text(f"Kadr: {width} x {height} px | X={x} Y={y}")
         else:
-            self.crop_status.set_text("Kadrowanie: wyłączone")
+            self.crop_btn.set_tooltip_text("Kadrowanie: wyłączone")
 
     def reset_crop(self, *_):
         self.crop_rect = None
+        if self.crop_panel is not None:
+            self.crop_panel.set_crop((0, 0, self.crop_panel.width, self.crop_panel.height))
         self.update_crop_status()
 
     def close_crop(self):
@@ -990,6 +987,7 @@ class YTCut(Gtk.Window):
             self.crop_panel.show_all()
             self.video_stack.set_visible_child(self.crop_panel)
             self.crop_btn.set_sensitive(False)
+            self.crop_reset.show()
             for widget in (self.play_btn, self.frame_back_btn, self.frame_forward_btn, self.jump_btn):
                 widget.set_sensitive(False)
         except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:

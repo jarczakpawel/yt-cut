@@ -11,6 +11,8 @@ import threading
 from pathlib import Path
 from urllib.parse import urlparse
 from hls_clip import download as download_hls, FastUnavailable
+from crop_geometry import ffmpeg_crop
+from crop_editor_qt import CropPanel
 
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal, QObject, QRectF, QPointF
 from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
@@ -19,7 +21,7 @@ from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication, QWidget, QMainWindow, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QComboBox, QCheckBox, QDoubleSpinBox, QProgressBar,
-    QFrame, QSizePolicy,
+    QFrame, QSizePolicy, QStackedWidget,
 )
 
 BASE = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -177,6 +179,7 @@ class Window(QMainWindow):
         self.position = 0
         self.fps = 30
         self.media = None
+        self.crop_rect = None
         self.directory = None
         self.old_dirs = []
         self.download_job = 0
@@ -268,7 +271,10 @@ class Window(QMainWindow):
         self.video.setMinimumHeight(280)
         self.video.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.player.setVideoOutput(self.video)
-        main.addWidget(self.video, 1)
+        self.video_stack = QStackedWidget()
+        self.video_stack.addWidget(self.video)
+        self.crop_panel = None
+        main.addWidget(self.video_stack, 1)
 
         controls = QHBoxLayout()
         self.play_button = QPushButton("▶  Odtwórz")
@@ -344,6 +350,18 @@ class Window(QMainWindow):
         settings.addStretch()
         main.addLayout(settings)
 
+        crop_row = QHBoxLayout()
+        self.crop_button = QPushButton("Kadruj obraz")
+        self.crop_button.clicked.connect(self.open_crop)
+        crop_row.addWidget(self.crop_button)
+        self.crop_reset = QPushButton("Resetuj kadr")
+        self.crop_reset.clicked.connect(self.reset_crop)
+        crop_row.addWidget(self.crop_reset)
+        self.crop_status = QLabel("Kadrowanie: wyłączone")
+        crop_row.addWidget(self.crop_status)
+        crop_row.addStretch()
+        main.addLayout(crop_row)
+
         foot = QHBoxLayout()
         self.status = QLabel("Gotowy. Wklej link do YouTube.")
         self.status.setWordWrap(True)
@@ -390,6 +408,8 @@ QCheckBox { spacing:5px; }
 
     def update_enabled(self):
         ready = self.media is not None
+        self.crop_button.setEnabled(ready)
+        self.crop_reset.setEnabled(ready and self.crop_rect is not None)
         for widget in (self.play_button, self.back_button, self.next_button, self.restart_button,
                        self.mark_start_button, self.mark_end_button, self.start_edit, self.end_edit):
             widget.setEnabled(ready)
@@ -526,6 +546,9 @@ QCheckBox { spacing:5px; }
         self.update_fields()
 
     def clear_media(self):
+        self.close_crop()
+        self.crop_rect = None
+        self.update_crop_status()
         self.player.stop()
         self.player.setSource(QUrl())
         self.media = None
@@ -739,6 +762,8 @@ QCheckBox { spacing:5px; }
         if job != self.download_job:
             return
         self.is_downloading = False
+        self.crop_rect = None
+        self.update_crop_status()
         self.media, self.duration, self.end, self.fps = path, duration, duration, fps
         self.position = self.anchor = self.start = 0
         self.player.setSource(QUrl.fromLocalFile(path))
@@ -780,6 +805,59 @@ QCheckBox { spacing:5px; }
         self.status.setText("Pobieranie anulowane.")
         self.progress.setValue(0)
 
+    def update_crop_status(self):
+        if self.crop_rect:
+            x, y, width, height = self.crop_rect
+            self.crop_status.setText(f"Kadr: {width} x {height} px  |  X={x}  Y={y}")
+        else:
+            self.crop_status.setText("Kadrowanie: wyłączone")
+        self.crop_reset.setEnabled(self.crop_rect is not None)
+
+    def reset_crop(self):
+        self.crop_rect = None
+        self.update_crop_status()
+
+    def close_crop(self):
+        if self.crop_panel is not None:
+            self.video_stack.setCurrentWidget(self.video)
+            self.video_stack.removeWidget(self.crop_panel)
+            self.crop_panel.deleteLater()
+            self.crop_panel = None
+            self.player.pause()
+            self.update_enabled()
+
+    def finish_crop(self, crop):
+        self.crop_rect = crop
+        self.close_crop()
+        self.update_crop_status()
+
+    def open_crop(self):
+        if not self.media or self.crop_panel is not None:
+            return
+        self.player.pause()
+        self.play_button.setText("▶  Odtwórz")
+        image = str(Path(self.directory) / "crop-frame.png")
+        position = min(self.position, max(0, self.duration - 80)) / 1000
+        try:
+            output = subprocess.run(
+                [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+                 "-ss", f"{position:.3f}", "-i", self.media,
+                 "-frames:v", "1", "-vf",
+                 "scale=trunc(iw*sar/2)*2:ih,setsar=1", image],
+                capture_output=True, text=True, timeout=25,
+                creationflags=CREATE_NO_WINDOW,
+            )
+            if output.returncode or not Path(image).is_file():
+                raise RuntimeError(output.stderr[-350:] or "Brak klatki filmu")
+            self.crop_panel = CropPanel(image, self.crop_rect, self.finish_crop, self.close_crop)
+            self.video_stack.addWidget(self.crop_panel)
+            self.video_stack.setCurrentWidget(self.crop_panel)
+            self.crop_button.setEnabled(False)
+            for widget in (self.play_button, self.back_button, self.next_button, self.restart_button):
+                widget.setEnabled(False)
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            self.status.setText(f"Błąd kadrowania: {exc}")
+
     def export(self):
         if not self.media or self.export_proc and self.export_proc.poll() is None:
             return
@@ -807,9 +885,12 @@ QCheckBox { spacing:5px; }
                 "-progress", "pipe:1", "-ss", f"{start:.3f}", "-i", self.media,
                 "-t", f"{length:.3f}", "-sn", "-dn"]
         if mode == "mp4":
-            args += ["-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264",
-                     "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
-                     "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]
+            args += ["-map", "0:v:0", "-map", "0:a:0?"]
+            if self.crop_rect:
+                args += ["-vf", ffmpeg_crop(self.crop_rect)]
+            args += ["-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                     "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+                     "-movflags", "+faststart"]
         else:
             args += ["-map", "0:a:0", "-vn"]
             args += ["-c:a", "libmp3lame", "-q:a", "2"] if mode == "mp3" else ["-c:a", "pcm_s16le"]
@@ -927,7 +1008,39 @@ def media_check():
                                    creationflags=CREATE_NO_WINDOW)
             if check.returncode or not (0.4 <= float(check.stdout.strip()) <= .6):
                 raise RuntimeError("Media export validation failed")
+            frame = str(Path(directory) / "frame.png")
+            cropped = str(Path(directory) / "cropped.mp4")
+            shot = subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+                                   "-ss", "0.5", "-i", sample, "-frames:v", "1",
+                                   "-vf", "scale=trunc(iw*sar/2)*2:ih,setsar=1", frame],
+                                  capture_output=True, text=True, timeout=20,
+                                  creationflags=CREATE_NO_WINDOW)
+            if shot.returncode:
+                raise RuntimeError(f"Crop frame: {shot.stderr[-1000:]}")
+            export_crop = subprocess.run(
+                [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", sample, "-t", "0.5",
+                 "-vf", ffmpeg_crop((31, 21, 160, 90)), "-c:v", "libx264",
+                 "-preset", "ultrafast", "-pix_fmt", "yuv420p", cropped],
+                capture_output=True, text=True, timeout=20, creationflags=CREATE_NO_WINDOW)
+            if export_crop.returncode:
+                raise RuntimeError(f"FFmpeg crop: {export_crop.stderr[-1000:]}")
+            crop_info = subprocess.run(
+                [FFPROBE, "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=width,height", "-of", "json", cropped],
+                capture_output=True, text=True, timeout=15, creationflags=CREATE_NO_WINDOW)
+            if crop_info.returncode or json.loads(crop_info.stdout)["streams"][0] != {"width": 160, "height": 90}:
+                raise RuntimeError("Cropping dimensions do not match selection")
             app = QApplication([])
+            selection = CropPanel(frame, (31, 21, 160, 90), lambda x: None, lambda: None)
+            if selection.crop != (31, 21, 160, 90):
+                raise RuntimeError("Crop panel selected wrong coordinates")
+            selection.canvas.resize(600, 300)
+            from PySide6.QtGui import QImage, QPainter
+            drawing = QImage(600, 300, QImage.Format_ARGB32)
+            painter = QPainter(drawing)
+            selection.canvas.render(painter)
+            painter.end()
+            selection.deleteLater()
             player = QMediaPlayer()
             sink = QVideoSink()
             player.setVideoSink(sink)
@@ -945,7 +1058,7 @@ def media_check():
             player.setSource(QUrl())
             del player, sink
             app.quit()
-            log.write_text(f"PASS: {frames[0]} decoded frame(s), FFmpeg export verified\n")
+            log.write_text(f"PASS: {frames[0]} decoded frame(s), FFmpeg and crop panel verified\n")
     except Exception as exc:
         log.write_text(f"FAIL: {exc}\n")
         raise SystemExit(1)

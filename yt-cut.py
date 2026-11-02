@@ -20,6 +20,7 @@ import threading
 from pathlib import Path
 from urllib.parse import urlparse
 from hls_clip import download as download_hls, FastUnavailable
+from crop_geometry import ffmpeg_crop
 
 HOME = Path.home()
 DOWNLOADS = Path(os.environ.get("XDG_DOWNLOAD_DIR", str(HOME / "Pobrane"))).expanduser()
@@ -226,6 +227,7 @@ class YTCut(Gtk.Window):
         self.frame_pending = False
         self.paused = True
         self.media = None
+        self.crop_rect = None
         self.workdir = None
         self.job_id = 0
         self.export_id = 0
@@ -317,7 +319,12 @@ class YTCut(Gtk.Window):
         self.video.set_size_request(640, 260)
         self.video.connect("draw", self.video_background)
         self.video.connect("realize", self.video_realized)
-        video_box.add(self.video)
+        self.video_stack = Gtk.Stack()
+        self.video_stack.set_transition_type(Gtk.StackTransitionType.NONE)
+        self.video_stack.add_named(self.video, "video")
+        self.video_stack.set_visible_child_name("video")
+        self.crop_panel = None
+        video_box.add(self.video_stack)
 
         controls = Gtk.Box(spacing=9)
         outer.pack_start(controls, False, False, 0)
@@ -398,6 +405,18 @@ class YTCut(Gtk.Window):
         self.fade_seconds.set_digits(1)
         settings.pack_start(self.fade_seconds, False, False, 0)
         settings.pack_start(Gtk.Label(label="s"), False, False, 0)
+
+        crop_row = Gtk.Box(spacing=10)
+        outer.pack_start(crop_row, False, False, 0)
+        self.crop_btn = self.button("Kadruj obraz", self.open_crop)
+        self.crop_btn.set_sensitive(False)
+        crop_row.pack_start(self.crop_btn, False, False, 0)
+        self.crop_reset = self.button("Resetuj kadr", self.reset_crop)
+        self.crop_reset.set_sensitive(False)
+        crop_row.pack_start(self.crop_reset, False, False, 0)
+        self.crop_status = Gtk.Label(label="Kadrowanie: wyłączone")
+        self.crop_status.set_xalign(0)
+        crop_row.pack_start(self.crop_status, True, True, 0)
 
         bottom = Gtk.Box(spacing=12)
         outer.pack_start(bottom, False, False, 0)
@@ -662,6 +681,10 @@ class YTCut(Gtk.Window):
 
     def clear_video(self):
         self.command("stop")
+        self.close_crop()
+        self.crop_rect = None
+        self.crop_btn.set_sensitive(False)
+        self.update_crop_status()
         self.media = None
         self.duration = 0
         self.position_ms = 0
@@ -868,6 +891,9 @@ class YTCut(Gtk.Window):
         if job != self.job_id:
             return False
         self.is_downloading = False
+        self.crop_rect = None
+        self.update_crop_status()
+        self.crop_btn.set_sensitive(True)
         self.media = path
         self.duration = duration
         self.start = 0
@@ -916,6 +942,59 @@ class YTCut(Gtk.Window):
         self.progress.set_text("Anulowano")
         self.status.set_text("Anulowano pobieranie.")
 
+    def update_crop_status(self):
+        self.crop_reset.set_sensitive(self.crop_rect is not None)
+        if self.crop_rect:
+            x, y, width, height = self.crop_rect
+            self.crop_status.set_text(f"Kadr: {width} x {height} px  |  X={x}  Y={y}")
+        else:
+            self.crop_status.set_text("Kadrowanie: wyłączone")
+
+    def reset_crop(self, *_):
+        self.crop_rect = None
+        self.update_crop_status()
+
+    def close_crop(self):
+        if self.crop_panel:
+            self.video_stack.set_visible_child(self.video)
+            self.video_stack.remove(self.crop_panel)
+            self.crop_panel = None
+            self.command("set_property", "pause", True)
+            self.crop_btn.set_sensitive(bool(self.media))
+            for widget in (self.play_btn, self.frame_back_btn, self.frame_forward_btn, self.jump_btn):
+                widget.set_sensitive(bool(self.media))
+
+    def finish_crop(self, crop):
+        self.crop_rect = crop
+        self.close_crop()
+        self.update_crop_status()
+
+    def open_crop(self, *_):
+        if not self.media or self.crop_panel:
+            return
+        self.command("set_property", "pause", True)
+        image = str(Path(self.workdir) / "crop-frame.png")
+        position = min(self.position_ms, max(0, self.duration - 80)) / 1000
+        try:
+            output = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                 "-ss", f"{position:.3f}", "-i", self.media, "-frames:v", "1",
+                 "-vf", "scale=trunc(iw*sar/2)*2:ih,setsar=1", image],
+                capture_output=True, text=True, timeout=25,
+            )
+            if output.returncode or not Path(image).is_file():
+                raise RuntimeError(output.stderr[-350:] or "Brak klatki filmu")
+            from crop_editor_gtk import CropPanel
+            self.crop_panel = CropPanel(image, self.crop_rect, self.finish_crop, self.close_crop)
+            self.video_stack.add_named(self.crop_panel, "crop")
+            self.crop_panel.show_all()
+            self.video_stack.set_visible_child(self.crop_panel)
+            self.crop_btn.set_sensitive(False)
+            for widget in (self.play_btn, self.frame_back_btn, self.frame_forward_btn, self.jump_btn):
+                widget.set_sensitive(False)
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            self.status.set_text(f"Błąd kadrowania: {exc}")
+
     def start_export(self, *_):
         if not self.media or self.export_proc is not None and self.export_proc.poll() is None:
             return
@@ -945,8 +1024,11 @@ class YTCut(Gtk.Window):
                "-progress", "pipe:1", "-ss", f"{start:.3f}", "-i", self.media,
                "-t", f"{length:.3f}", "-sn", "-dn"]
         if kind == "mp4":
-            cmd += ["-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "fast",
-                    "-crf", "18", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+            cmd += ["-map", "0:v:0", "-map", "0:a:0?"]
+            if self.crop_rect:
+                cmd += ["-vf", ffmpeg_crop(self.crop_rect)]
+            cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
                     "-movflags", "+faststart"]
         else:
             cmd += ["-map", "0:a:0", "-vn", "-c:a", "libmp3lame", "-q:a", "2"] if kind == "mp3" else ["-map", "0:a:0", "-vn", "-c:a", "pcm_s16le"]

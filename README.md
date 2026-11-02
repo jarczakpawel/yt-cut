@@ -36,6 +36,8 @@ The Linux version embeds mpv in a GTK window, so it needs a running X11/XWayland
 
 - Download a YouTube video from a URL and preview it in the built-in player
 - **Download only a selected time range** from a longer video, without downloading the entire video
+- See the calculated interval length update immediately when editing the FROM / TO fields
+- See live download progress for full videos, and FFmpeg processing progress for selected intervals
 - Set exact **START** and **END** timestamps, down to milliseconds
 - Choose a playback position directly on the timeline
 - Pause and return to the selected playback position
@@ -63,7 +65,9 @@ The Linux version embeds mpv in a GTK window, so it needs a running X11/XWayland
 - Drag the red handles: adjust START / END
 - Play / Pause: preview from the selected point and return to it on pause
 
-Downloading a time range uses yt-dlp with FFmpeg and accurate re-encoding at the cut boundaries. Progress is shown as a percentage when yt-dlp reports one, otherwise as an indeterminate activity indicator while the selected fragment is being fetched or processed.
+Downloading a time range uses yt-dlp with FFmpeg and accurate re-encoding at the cut boundaries. The interval's progress percentage is calculated from the timestamp of the encoded output reported by FFmpeg, not from the bytes transferred over the network. An animated indicator with elapsed time is shown until encoding starts producing progress reports. Percentage values are capped at 99% until the resulting file has been finalized.
+
+YouTube may throttle FFmpeg's HTTP seeking for long source videos. Downloading a short fragment can therefore still be slow, and the application cannot reliably predict a completion time.
 
 Timestamp fields support `HH:MM:SS.mmm`. Export is performed with FFmpeg using accurate seeking and re-encoding. Actual video-frame precision depends on the source media and decoder; a millisecond timestamp does not guarantee an independently decodable frame at that exact instant.
 

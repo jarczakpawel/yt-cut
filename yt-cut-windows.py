@@ -177,6 +177,8 @@ class Window(QMainWindow):
         self.restoring = False
         self.last_error = ""
         self.is_downloading = False
+        self.download_has_percent = False
+        self.download_started_at = 0.0
         self.signals = Events()
         self.signals.progress.connect(self.on_progress)
         self.signals.downloaded.connect(self.on_downloaded)
@@ -228,6 +230,12 @@ class Window(QMainWindow):
         self.fragment_to.setEnabled(False)
         self.only_fragment.toggled.connect(self.fragment_from.setEnabled)
         self.only_fragment.toggled.connect(self.fragment_to.setEnabled)
+        self.fragment_duration_label = QLabel("Długość: 00:01:00.000")
+        self.fragment_duration_label.setObjectName("clock")
+        section_row.addWidget(self.fragment_duration_label)
+        self.only_fragment.toggled.connect(self.update_fragment_duration)
+        self.fragment_from.textChanged.connect(self.update_fragment_duration)
+        self.fragment_to.textChanged.connect(self.update_fragment_duration)
         main.addLayout(section_row)
 
         self.progress = QProgressBar()
@@ -352,6 +360,19 @@ QProgressBar::chunk { background:#eb5650; border-radius:3px; }
 QCheckBox { spacing:5px; }
 """)
 
+    def update_fragment_duration(self, *_):
+        if not self.only_fragment.isChecked():
+            self.fragment_duration_label.setText("Cały film")
+            return
+        try:
+            begin = parse_clock(self.fragment_from.text())
+            end = parse_clock(self.fragment_to.text())
+            if end <= begin:
+                raise ValueError("Invalid time range")
+            self.fragment_duration_label.setText(f"Długość: {clock(end - begin)}")
+        except ValueError:
+            self.fragment_duration_label.setText("Nieprawidłowy zakres")
+
     def update_enabled(self):
         ready = self.media is not None
         for widget in (self.play_button, self.back_button, self.next_button, self.restart_button,
@@ -386,6 +407,10 @@ QCheckBox { spacing:5px; }
             self.status.setText(f"Błąd odtwarzacza: {message}")
 
     def tick(self):
+        if self.is_downloading and not self.download_has_percent:
+            elapsed = round(time.monotonic() - self.download_started_at)
+            self.progress.setFormat(f"Downloading fragment... {elapsed} s" if self.only_fragment.isChecked()
+                                    else f"Connecting... {elapsed} s")
         if not self.media or self.restoring:
             return
         if self.player.playbackState() == QMediaPlayer.PlayingState:
@@ -531,6 +556,8 @@ QCheckBox { spacing:5px; }
         self.progress.setFormat("Pobieranie fragmentu..." if section else "Pobieranie filmu...")
         self.status.setText("Pobieranie fragmentu..." if section else "Pobieranie filmu...")
         self.is_downloading = True
+        self.download_has_percent = False
+        self.download_started_at = time.monotonic()
         job, directory = self.download_job, self.directory
         threading.Thread(target=self.download_worker, args=(job, url, directory, section), daemon=True).start()
 
@@ -540,9 +567,14 @@ QCheckBox { spacing:5px; }
                 "--merge-output-format", "mkv", "-o", str(Path(directory) / "source.%(ext)s"),
                 "--print", "after_move:YT_CUT_FILE:%(filepath)s"]
         if section:
-            args += ["--download-sections", section, "--force-keyframes-at-cuts"]
+            args += ["--download-sections", section, "--force-keyframes-at-cuts",
+                     "--downloader-args", "ffmpeg_o:-progress pipe:2 -nostats"]
         args.append(url)
         errors, path = [], None
+        section_us = None
+        if section:
+            begin, end = section[1:].split("-", 1)
+            section_us = (parse_clock(end) - parse_clock(begin)) * 1000
         try:
             if job != self.download_job:
                 return
@@ -559,9 +591,16 @@ QCheckBox { spacing:5px; }
                 if line:
                     errors.append(line)
                     errors = errors[-12:]
-                found = re.search(r"\[download\]\s+(\d+(?:\.\d+)?)%", line)
-                if found:
-                    self.signals.progress.emit(job, float(found.group(1)) / 100, "Pobieranie")
+                if section and line.startswith("out_time_us="):
+                    try:
+                        micros = int(line.split("=", 1)[1])
+                        self.signals.progress.emit(job, max(0, min(.99, micros / section_us)), "Pobieranie")
+                    except ValueError:
+                        pass
+                elif not section:
+                    found = re.search(r"\[download\]\s+(\d+(?:\.\d+)?)%", line)
+                    if found:
+                        self.signals.progress.emit(job, float(found.group(1)) / 100, "Pobieranie")
             rc = proc.wait()
             if job != self.download_job:
                 return
@@ -604,6 +643,8 @@ QCheckBox { spacing:5px; }
     def on_progress(self, job, fraction, name):
         if job != (self.download_job if name == "Pobieranie" else self.export_job):
             return
+        if name == "Pobieranie":
+            self.download_has_percent = True
         self.progress.setRange(0, 1000)
         self.progress.setValue(round(max(0, min(1, fraction)) * 1000))
         self.progress.setFormat(f"{name}: {fraction * 100:.1f}%")
@@ -788,6 +829,19 @@ def media_check():
                       "-t", "1.5", "-c:v", "libx264", "-preset", "ultrafast",
                       "-pix_fmt", "yuv420p", sample]
             subprocess.run(create, check=True, timeout=20, creationflags=CREATE_NO_WINDOW)
+            export = subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+                                     "-ss", ".25", "-i", sample, "-t", ".5", "-c:v",
+                                     "libx264", "-crf", "18", "-preset", "fast", out],
+                                    capture_output=True, text=True, timeout=20,
+                                    creationflags=CREATE_NO_WINDOW)
+            if export.returncode:
+                raise RuntimeError(f"FFmpeg export failed: {export.stderr[-1800:]}")
+            check = subprocess.run([FFPROBE, "-v", "error", "-show_entries",
+                                    "format=duration", "-of", "default=noprint_wrappers=1:nokey=1",
+                                    out], capture_output=True, text=True, timeout=15,
+                                   creationflags=CREATE_NO_WINDOW)
+            if check.returncode or not (0.4 <= float(check.stdout.strip()) <= .6):
+                raise RuntimeError("Media export validation failed")
             app = QApplication([])
             player = QMediaPlayer()
             sink = QVideoSink()
@@ -806,19 +860,9 @@ def media_check():
             player.setSource(QUrl())
             del player, sink
             app.quit()
-            subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
-                            "-ss", ".25", "-i", sample, "-t", ".5", "-c:v",
-                            "libx264", "-crf", "18", "-preset", "fast", out],
-                           check=True, timeout=20, creationflags=CREATE_NO_WINDOW)
-            check = subprocess.run([FFPROBE, "-v", "error", "-show_entries",
-                                    "format=duration", "-of", "default=noprint_wrappers=1:nokey=1",
-                                    out], capture_output=True, text=True, timeout=15,
-                                   creationflags=CREATE_NO_WINDOW)
-            if check.returncode or not (0.4 <= float(check.stdout.strip()) <= .6):
-                raise RuntimeError("Media export validation failed")
-            log.write_text(f"PASS: {frames[0]} decoded frame(s), FFmpeg export verified\\n")
+            log.write_text(f"PASS: {frames[0]} decoded frame(s), FFmpeg export verified\n")
     except Exception as exc:
-        log.write_text(f"FAIL: {exc}\\n")
+        log.write_text(f"FAIL: {exc}\n")
         raise SystemExit(1)
 
 

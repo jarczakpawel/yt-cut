@@ -12,6 +12,7 @@ import math
 import re
 import shutil
 import socket
+import time
 import subprocess
 import tempfile
 import threading
@@ -233,6 +234,7 @@ class YTCut(Gtk.Window):
         self.last_pulse = 0
         self.is_downloading = False
         self.download_has_percent = False
+        self.download_started_at = 0.0
 
         provider = Gtk.CssProvider()
         provider.load_from_data(CSS.encode())
@@ -274,10 +276,14 @@ class YTCut(Gtk.Window):
         section_row.pack_start(self.fragment_to, False, False, 0)
         for field in (self.fragment_from, self.fragment_to):
             field.set_sensitive(False)
-        self.only_fragment.connect("toggled", lambda check: [
-            field.set_sensitive(check.get_active())
-            for field in (self.fragment_from, self.fragment_to)
-        ])
+        self.only_fragment.connect("toggled", self.fragment_changed)
+        for field in (self.fragment_from, self.fragment_to):
+            field.connect("changed", self.fragment_changed)
+        self.fragment_duration_label = Gtk.Label(label="Długość: 00:01:00.000")
+        self.fragment_duration_label.set_xalign(0)
+        self.fragment_duration_label.get_style_context().add_class("clock")
+        section_row.pack_start(self.fragment_duration_label, False, False, 0)
+        self.fragment_changed()
 
         self.progress = Gtk.ProgressBar()
         self.progress.set_show_text(True)
@@ -391,6 +397,22 @@ class YTCut(Gtk.Window):
         self.progress.set_fraction(0)
         self.show_all()
         GLib.timeout_add(30, self.tick)
+
+    def fragment_changed(self, *_):
+        enabled = self.only_fragment.get_active()
+        for field in (self.fragment_from, self.fragment_to):
+            field.set_sensitive(enabled)
+        if not enabled:
+            self.fragment_duration_label.set_text("Cały film")
+            return
+        try:
+            begin = parse_clock(self.fragment_from.get_text())
+            end = parse_clock(self.fragment_to.get_text())
+            if end <= begin:
+                raise ValueError("Nieprawidłowy zakres")
+            self.fragment_duration_label.set_text(f"Długość: {clock(end - begin)}")
+        except ValueError:
+            self.fragment_duration_label.set_text("Nieprawidłowy zakres")
 
     def button(self, text, handler, style=None):
         b = Gtk.Button(label=text)
@@ -511,6 +533,9 @@ class YTCut(Gtk.Window):
             if self.last_pulse >= 3:
                 self.progress.pulse()
                 self.last_pulse = 0
+            elapsed = round(time.monotonic() - self.download_started_at)
+            self.progress.set_text(f"Pobieranie fragmentu... {elapsed} s" if self.only_fragment.get_active()
+                                   else f"Łączenie... {elapsed} s")
         if self.duration:
             self.position_label.set_text(f"{clock(self.position_ms)} / {clock(self.duration)}")
             self.timeline.queue_draw()
@@ -668,6 +693,7 @@ class YTCut(Gtk.Window):
         self.status.set_text("Pobieranie fragmentu..." if section else "Pobieranie filmu...")
         self.is_downloading = True
         self.download_has_percent = False
+        self.download_started_at = time.monotonic()
         self.last_download_error = ""
         job = self.job_id
         threading.Thread(target=self.download_worker, args=(job, url, self.workdir, section), daemon=True).start()
@@ -681,10 +707,15 @@ class YTCut(Gtk.Window):
             "--print", "after_move:YT_CUT_FILE:%(filepath)s",
         ]
         if section:
-            cmd += ["--download-sections", section, "--force-keyframes-at-cuts"]
+            cmd += ["--download-sections", section, "--force-keyframes-at-cuts",
+                    "--downloader-args", "ffmpeg_o:-progress pipe:2 -nostats"]
         cmd.append(url)
         filepath = None
         errors = []
+        section_us = None
+        if section:
+            begin, finish = section[1:].split("-", 1)
+            section_us = (parse_clock(finish) - parse_clock(begin)) * 1000
         try:
             if job != self.job_id:
                 return
@@ -702,9 +733,16 @@ class YTCut(Gtk.Window):
                 errors.append(line)
                 if len(errors) > 15:
                     errors.pop(0)
-                percent = re.search(r"\[download\]\s+(\d+(?:\.\d+)?)%", line)
-                if percent:
-                    GLib.idle_add(self.download_progress, job, float(percent.group(1)))
+                if section and line.startswith("out_time_us="):
+                    try:
+                        micros = int(line.split("=", 1)[1])
+                        GLib.idle_add(self.download_progress, job, max(0.0, min(99.0, micros / section_us * 100.0)))
+                    except ValueError:
+                        pass
+                elif not section:
+                    percent = re.search(r"\[download\]\s+(\d+(?:\.\d+)?)%", line)
+                    if percent:
+                        GLib.idle_add(self.download_progress, job, float(percent.group(1)))
             code = proc.wait()
             if job != self.job_id:
                 return

@@ -56,6 +56,7 @@ jobs:
           $media = Start-Process -FilePath (Resolve-Path "$root\\YT-Cut.exe").Path -ArgumentList "--media-check" -Wait -PassThru -WorkingDirectory (Resolve-Path $root).Path
           Get-Content "$root\\media-check.log"
           if ($media.ExitCode -ne 0) { throw "Windows media decoding and export check returned $($media.ExitCode)" }
+          Remove-Item "$root\media-check.log"
       - name: Create portable ZIP
         shell: pwsh
         run: Compress-Archive -Path dist\YT-Cut -DestinationPath YT-Cut-Windows-x64.zip -CompressionLevel Optimal

@@ -7,6 +7,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("GdkX11", "3.0")
 from gi.repository import Gtk, Gdk, GdkX11, GLib
 import json
+import fcntl
 import math
 import re
 import shutil
@@ -36,7 +37,7 @@ label.muted { color: #9ca6b7; }
 label.clock { font-family: monospace; font-weight: bold; font-size: 14px; }
 frame { border: 1px solid #343b48; border-radius: 8px; }
 checkbutton { padding: 4px; }
-progressbar trough { background: #303641; min-height: 5px; border-radius: 3px; }
+progressbar trough { background: #303641; min-height: 18px; border-radius: 5px; }
 progressbar progress { background: #ee5652; border-radius: 3px; }
 headerbar { background: #20242d; color: white; border: none; }
 """
@@ -225,6 +226,8 @@ class YTCut(Gtk.Window):
         self.sock_buf = b""
         self.ipc_dir = tempfile.mkdtemp(prefix="ytcut-ipc-")
         self.ipc_path = str(Path(self.ipc_dir) / "mpv.sock")
+        self.mpv_log = str(Path(self.ipc_dir) / "mpv.log")
+        self.mpv_ready = False
         self.last_download_error = ""
         self.updating_entries = False
         self.last_pulse = 0
@@ -252,6 +255,11 @@ class YTCut(Gtk.Window):
         self.cancel_btn = self.button("Anuluj", self.cancel_download)
         self.cancel_btn.set_sensitive(False)
         urlrow.pack_start(self.cancel_btn, False, False, 0)
+
+        self.progress = Gtk.ProgressBar()
+        self.progress.set_show_text(True)
+        self.progress.set_text("Gotowy")
+        outer.pack_start(self.progress, False, False, 0)
 
         self.title_label = Gtk.Label(label="Brak wczytanego filmu")
         self.title_label.set_xalign(0)
@@ -357,8 +365,6 @@ class YTCut(Gtk.Window):
         self.export_btn = self.button("Wytnij i zapisz do Pobrane", self.start_export, "primary")
         self.export_btn.set_sensitive(False)
         bottom.pack_start(self.export_btn, False, False, 0)
-        self.progress = Gtk.ProgressBar()
-        outer.pack_start(self.progress, False, False, 0)
         self.progress.set_fraction(0)
         self.show_all()
         GLib.timeout_add(30, self.tick)
@@ -380,18 +386,28 @@ class YTCut(Gtk.Window):
         cmd = [
             "mpv", f"--wid={xid}", "--no-config", "--no-terminal", "--idle=yes",
             "--force-window=yes", "--keep-open=yes", "--pause=yes", "--osc=no",
-            "--osd-level=0", "--input-default-bindings=no", "--hwdec=auto-safe",
-            f"--input-ipc-server={self.ipc_path}", "--msg-level=all=error",
+            "--vo=gpu", "--gpu-context=x11egl", "--osd-level=0",
+            "--input-default-bindings=no", "--hwdec=auto-safe",
+            f"--input-ipc-server={self.ipc_path}", "--msg-level=all=warn",
         ]
+        env = os.environ.copy()
+        env.pop("WAYLAND_DISPLAY", None)
+        env["DISPLAY"] = Gdk.Display.get_default().get_name()
+        self.mpv_log_file = open(self.mpv_log, "w")
         try:
-            self.mpv = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.mpv = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL,
+                                        stdout=self.mpv_log_file, stderr=subprocess.STDOUT)
         except OSError as exc:
             self.status.set_text(f"Nie można uruchomić odtwarzacza: {exc}")
+            self.mpv_log_file.close()
             return
         GLib.timeout_add(80, self.connect_ipc)
 
     def connect_ipc(self):
-        if not self.mpv or self.mpv.poll() is not None:
+        if not self.mpv:
+            return False
+        if self.mpv.poll() is not None:
+            self.status.set_text(f"Błąd uruchamiania odtwarzacza mpv (kod {self.mpv.returncode}). Szczegóły: {self.mpv_log}")
             return False
         sock = None
         try:
@@ -399,16 +415,18 @@ class YTCut(Gtk.Window):
             sock.connect(self.ipc_path)
             sock.setblocking(False)
         except OSError:
-            try:
-                if sock:
-                    sock.close()
-            except OSError:
-                pass
+            if sock:
+                sock.close()
             return True
         self.sock = sock
+        self.mpv_ready = True
         GLib.io_add_watch(sock.fileno(), GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, self.read_ipc)
-        for i, name in enumerate(("time-pos", "pause", "duration"), start=1):
+        for i, name in enumerate(("time-pos", "pause", "duration", "idle-active"), start=1):
             self.command("observe_property", i, name)
+        if self.media:
+            self.command("loadfile", self.media, "replace")
+            self.command("set_property", "pause", True)
+            self.apply_loop()
         return False
 
     def command(self, *args):
@@ -422,6 +440,8 @@ class YTCut(Gtk.Window):
     def read_ipc(self, fd, condition):
         if condition & (GLib.IO_HUP | GLib.IO_ERR):
             self.sock = None
+            self.mpv_ready = False
+            self.status.set_text(f"Utracono połączenie z mpv. Log: {self.mpv_log}")
             return False
         try:
             data = self.sock.recv(65536)
@@ -431,6 +451,8 @@ class YTCut(Gtk.Window):
             return False
         if not data:
             self.sock = None
+            self.mpv_ready = False
+            self.status.set_text(f"mpv zakończył pracę. Log: {self.mpv_log}")
             return False
         self.sock_buf += data
         while b"\n" in self.sock_buf:
@@ -602,6 +624,7 @@ class YTCut(Gtk.Window):
         self.cancel_btn.set_sensitive(True)
         self.export_btn.set_sensitive(False)
         self.progress.set_fraction(0)
+        self.progress.set_text("Pobieranie 0%")
         self.status.set_text("Pobieranie filmu...")
         self.last_download_error = ""
         job = self.job_id
@@ -671,6 +694,7 @@ class YTCut(Gtk.Window):
         if job != self.job_id:
             return False
         self.progress.set_fraction(min(1, percent / 100))
+        self.progress.set_text(f"Pobieranie {percent:.1f}%")
         self.status.set_text(f"Pobieranie: {percent:.1f}%")
         return False
 
@@ -692,6 +716,7 @@ class YTCut(Gtk.Window):
         self.download_btn.set_sensitive(True)
         self.cancel_btn.set_sensitive(False)
         self.progress.set_fraction(1)
+        self.progress.set_text("Pobrano 100%")
         for widget in (self.play_btn, self.frame_back_btn, self.frame_forward_btn, self.jump_btn, self.export_btn, self.mark_start_btn, self.mark_end_btn):
             widget.set_sensitive(True)
         self.timeline.queue_draw()
@@ -703,6 +728,7 @@ class YTCut(Gtk.Window):
         self.download_btn.set_sensitive(True)
         self.cancel_btn.set_sensitive(False)
         self.progress.set_fraction(0)
+        self.progress.set_text("Błąd pobierania")
         self.status.set_text("Błąd pobierania: " + message[-470:])
         return False
 
@@ -718,6 +744,7 @@ class YTCut(Gtk.Window):
         self.download_btn.set_sensitive(True)
         self.cancel_btn.set_sensitive(False)
         self.progress.set_fraction(0)
+        self.progress.set_text("Anulowano")
         self.status.set_text("Anulowano pobieranie.")
 
     def start_export(self, *_):
@@ -761,6 +788,7 @@ class YTCut(Gtk.Window):
         job = self.export_id
         self.export_btn.set_sensitive(False)
         self.progress.set_fraction(0)
+        self.progress.set_text("Eksport 0%")
         self.status.set_text("Eksport...")
         threading.Thread(target=self.export_worker, args=(job, cmd, temp_target, target, length), daemon=True).start()
 
@@ -802,6 +830,7 @@ class YTCut(Gtk.Window):
         if job != self.export_id:
             return False
         self.progress.set_fraction(fraction)
+        self.progress.set_text(f"Eksport {fraction * 100:.1f}%")
         self.status.set_text(f"Eksport: {fraction * 100:.1f}%")
         return False
 
@@ -810,6 +839,7 @@ class YTCut(Gtk.Window):
             return False
         self.export_btn.set_sensitive(True)
         self.progress.set_fraction(1)
+        self.progress.set_text("Eksport zakończony")
         self.status.set_text(f"Zapisano: {target}")
         return False
 
@@ -818,6 +848,7 @@ class YTCut(Gtk.Window):
             return False
         self.export_btn.set_sensitive(bool(self.media))
         self.progress.set_fraction(0)
+        self.progress.set_text("Błąd eksportu")
         self.status.set_text("Błąd eksportu: " + error[-450:])
         return False
 
@@ -828,6 +859,8 @@ class YTCut(Gtk.Window):
             self.stop_process(proc)
         if self.sock:
             self.sock.close()
+        if hasattr(self, "mpv_log_file"):
+            self.mpv_log_file.close()
         for proc in (self.download_proc, self.export_proc, self.mpv):
             if proc:
                 try:
@@ -841,6 +874,41 @@ class YTCut(Gtk.Window):
         return False
 
 if __name__ == "__main__":
-    app = YTCut()
-    Gtk.main()
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
+    lock = open(runtime / f"yt-cut-{os.getuid()}.lock", "w")
+    socket_path = str(runtime / f"yt-cut-{os.getuid()}.sock")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.settimeout(1)
+                client.connect(socket_path)
+                client.sendall(b"present")
+        except OSError:
+            pass
+        raise SystemExit(0)
+    try:
+        Path(socket_path).unlink(missing_ok=True)
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(socket_path)
+        server.listen(3)
+        server.setblocking(False)
+        app = YTCut()
 
+        def show_existing(fd, condition):
+            try:
+                client, _ = server.accept()
+                with client:
+                    if client.recv(64) == b"present":
+                        app.present_with_time(Gdk.CURRENT_TIME)
+            except OSError:
+                pass
+            return True
+
+        GLib.io_add_watch(server.fileno(), GLib.IO_IN, show_existing)
+        Gtk.main()
+    finally:
+        if "server" in locals():
+            server.close()
+        Path(socket_path).unlink(missing_ok=True)

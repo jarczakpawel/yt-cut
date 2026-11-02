@@ -2,13 +2,7 @@ name: Windows portable
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
-    paths:
-      - "yt-cut-windows.py"
-      - "tools/**"
-      - "assets/**"
-      - ".github/workflows/windows.yml"
   workflow_dispatch:
 
 permissions:
@@ -59,6 +53,9 @@ jobs:
           }
           $result = Start-Process -FilePath (Resolve-Path "$root\YT-Cut.exe").Path -ArgumentList "--self-check" -Wait -PassThru
           if ($result.ExitCode -ne 0) { throw "Windows self-check returned $($result.ExitCode)" }
+          $media = Start-Process -FilePath (Resolve-Path "$root\\YT-Cut.exe").Path -ArgumentList "--media-check" -Wait -PassThru -WorkingDirectory (Resolve-Path $root).Path
+          Get-Content "$root\\media-check.log"
+          if ($media.ExitCode -ne 0) { throw "Windows media decoding and export check returned $($media.ExitCode)" }
       - name: Create portable ZIP
         shell: pwsh
         run: Compress-Archive -Path dist\YT-Cut -DestinationPath YT-Cut-Windows-x64.zip -CompressionLevel Optimal

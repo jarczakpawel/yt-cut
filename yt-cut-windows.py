@@ -5,13 +5,14 @@ import math
 import shutil
 import subprocess
 import tempfile
+import time
 import threading
 from pathlib import Path
 from urllib.parse import urlparse
 
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal, QObject, QRectF, QPointF
 from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
-from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication, QWidget, QMainWindow, QVBoxLayout, QHBoxLayout, QLabel,
@@ -187,6 +188,7 @@ class Window(QMainWindow):
         self.audio.setVolume(1)
         self.player.positionChanged.connect(self.position_changed)
         self.player.errorOccurred.connect(self.media_error)
+        self.player.mediaStatusChanged.connect(self.media_status_changed)
 
         center = QWidget()
         self.setCentralWidget(center)
@@ -208,6 +210,12 @@ class Window(QMainWindow):
         self.cancel_button.clicked.connect(self.cancel_download)
         urlrow.addWidget(self.cancel_button)
         main.addLayout(urlrow)
+        self.progress = QProgressBar()
+        self.progress.setMaximum(1000)
+        self.progress.setValue(0)
+        self.progress.setFormat("Ready")
+        self.progress.setTextVisible(True)
+        main.addWidget(self.progress)
 
         self.title_text = QLabel("Brak wczytanego filmu")
         self.title_text.setObjectName("subtle")
@@ -302,12 +310,6 @@ class Window(QMainWindow):
         self.export_button.clicked.connect(self.export)
         foot.addWidget(self.export_button)
         main.addLayout(foot)
-        self.progress = QProgressBar()
-        self.progress.setMaximum(1000)
-        self.progress.setValue(0)
-        self.progress.setTextVisible(False)
-        main.addWidget(self.progress)
-
         self.update_enabled()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
@@ -325,7 +327,7 @@ QPushButton:disabled { color:#66707e; }
 QPushButton#primary { background:#ed5350; border:1px solid #f5766d; color:white; font-weight:600; }
 QPushButton#primary:hover { background:#fa6a61; }
 QVideoWidget { background:#101216; }
-QProgressBar { background:#303640; border:0; border-radius:3px; max-height:7px; }
+QProgressBar { background:#303640; border:0; border-radius:5px; min-height:18px; text-align:center; font-weight:600; }
 QProgressBar::chunk { background:#eb5650; border-radius:3px; }
 QCheckBox { spacing:5px; }
 """)
@@ -353,6 +355,11 @@ QCheckBox { spacing:5px; }
             self.position = max(0, min(self.duration, int(position)))
             self.position_text.setText(f"{clock(self.position)} / {clock(self.duration)}")
             self.timeline.update()
+
+    def media_status_changed(self, status):
+        if status == QMediaPlayer.LoadedMedia and self.media:
+            self.player.pause()
+            self.seek(self.anchor)
 
     def media_error(self, error, message):
         if error != QMediaPlayer.NoError and self.media:
@@ -490,6 +497,7 @@ QCheckBox { spacing:5px; }
         self.download_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self.progress.setValue(0)
+        self.progress.setFormat("Downloading 0%")
         self.status.setText("Pobieranie filmu...")
         job, directory = self.download_job, self.directory
         threading.Thread(target=self.download_worker, args=(job, url, directory), daemon=True).start()
@@ -562,6 +570,7 @@ QCheckBox { spacing:5px; }
         if job != (self.download_job if name == "Pobieranie" else self.export_job):
             return
         self.progress.setValue(round(max(0, min(1, fraction)) * 1000))
+        self.progress.setFormat(f"{name}: {fraction * 100:.1f}%")
         self.status.setText(f"{name}: {fraction * 100:.1f}%")
 
     def on_downloaded(self, job, path, duration, fps):
@@ -576,6 +585,7 @@ QCheckBox { spacing:5px; }
         self.title_text.setText(f"Załadowano: {Path(path).name}  •  {clock(duration)}")
         self.status.setText("Gotowe. Wybierz fragment i kliknij Wytnij.")
         self.progress.setValue(1000)
+        self.progress.setFormat("Download complete 100%")
         self.download_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
 
@@ -588,6 +598,7 @@ QCheckBox { spacing:5px; }
             self.update_enabled()
             self.status.setText("Błąd eksportu: " + message[-420:])
         self.progress.setValue(0)
+        self.progress.setFormat("Error")
 
     def cancel_download(self):
         self.download_job += 1
@@ -642,6 +653,7 @@ QCheckBox { spacing:5px; }
         job = self.export_job
         self.export_button.setEnabled(False)
         self.progress.setValue(0)
+        self.progress.setFormat("Exporting 0%")
         self.status.setText("Eksport...")
         threading.Thread(target=self.export_worker, args=(job, args, target, temp, length), daemon=True).start()
 
@@ -689,6 +701,7 @@ QCheckBox { spacing:5px; }
         if job != self.export_job:
             return
         self.progress.setValue(1000)
+        self.progress.setFormat("Export complete 100%")
         self.status.setText(f"Zapisano: {path}")
         self.export_button.setEnabled(True)
 
@@ -722,10 +735,67 @@ def self_check():
     app.quit()
 
 
+def media_check():
+    log = Path.cwd() / "media-check.log"
+    try:
+        self_check()
+        with tempfile.TemporaryDirectory(prefix="ytcut-check-") as directory:
+            sample = str(Path(directory) / "sample.mp4")
+            out = str(Path(directory) / "result.mp4")
+            create = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+                      "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25",
+                      "-t", "1.5", "-c:v", "libx264", "-preset", "ultrafast",
+                      "-pix_fmt", "yuv420p", sample]
+            subprocess.run(create, check=True, timeout=20, creationflags=CREATE_NO_WINDOW)
+            app = QApplication([])
+            player = QMediaPlayer()
+            sink = QVideoSink()
+            player.setVideoSink(sink)
+            frames = [0]
+            sink.videoFrameChanged.connect(lambda frame: frames.__setitem__(0, frames[0] + int(frame.isValid())))
+            player.setSource(QUrl.fromLocalFile(sample))
+            player.play()
+            deadline = time.monotonic() + 12
+            while frames[0] == 0 and time.monotonic() < deadline:
+                app.processEvents()
+                time.sleep(.025)
+            if not frames[0]:
+                raise RuntimeError(f"No decoded video frames, error: {player.errorString()}, status: {player.mediaStatus()}")
+            player.stop()
+            player.setSource(QUrl())
+            del player, sink
+            app.quit()
+            subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+                            "-ss", ".25", "-i", sample, "-t", ".5", "-c:v",
+                            "libx264", "-crf", "18", "-preset", "fast", out],
+                           check=True, timeout=20, creationflags=CREATE_NO_WINDOW)
+            check = subprocess.run([FFPROBE, "-v", "error", "-show_entries",
+                                    "format=duration", "-of", "default=noprint_wrappers=1:nokey=1",
+                                    out], capture_output=True, text=True, timeout=15,
+                                   creationflags=CREATE_NO_WINDOW)
+            if check.returncode or not (0.4 <= float(check.stdout.strip()) <= .6):
+                raise RuntimeError("Media export validation failed")
+            log.write_text(f"PASS: {frames[0]} decoded frame(s), FFmpeg export verified\\n")
+    except Exception as exc:
+        log.write_text(f"FAIL: {exc}\\n")
+        raise SystemExit(1)
+
+
 if __name__ == "__main__":
     if "--self-check" in sys.argv:
         self_check()
+    elif "--media-check" in sys.argv:
+        media_check()
     else:
+        if sys.platform == "win32":
+            import ctypes
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.CreateMutexW.argtypes = (ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p)
+            kernel.CreateMutexW.restype = ctypes.c_void_p
+            instance_mutex = kernel.CreateMutexW(None, False, "Local\\YT-Cut-jarczakpawel")
+            if ctypes.get_last_error() == 183:
+                ctypes.windll.user32.MessageBoxW(None, "YT Cut is already running.", "YT Cut", 0x40)
+                sys.exit(0)
         app = QApplication(sys.argv)
         app.setApplicationName("YT Cut")
         window = Window()

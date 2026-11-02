@@ -35,6 +35,7 @@ The Linux version embeds mpv in a GTK window, so it needs a running X11/XWayland
 ## Features
 
 - Download a YouTube video from a URL and preview it in the built-in player
+- **Download only a selected time range** from a longer video, without downloading the entire video
 - Set exact **START** and **END** timestamps, down to milliseconds
 - Choose a playback position directly on the timeline
 - Pause and return to the selected playback position
@@ -49,10 +50,11 @@ The Linux version embeds mpv in a GTK window, so it needs a running X11/XWayland
 ## How to trim a video
 
 1. Paste a YouTube URL and select **Download**.
-2. Click the timeline to select a position (yellow marker). The white indicator shows the current playback position.
-3. Use **Set START from point** and **Set END from point**, drag the red markers, or enter timestamps directly.
-4. Select the output format and optional audio fades.
-5. Choose **Cut and save**. The exported file appears in your Downloads directory.
+2. To download only part of a long video, enable **Download only a fragment** under the URL, enter **FROM** and **TO**, then start the download. Otherwise the entire video is downloaded. The preview timeline starts at zero for the downloaded fragment.
+3. Click the timeline to select a position (yellow marker). The white indicator shows the current playback position.
+4. Use **Set START from point** and **Set END from point**, drag the red markers, or enter timestamps directly.
+5. Select the output format and optional audio fades.
+6. Choose **Cut and save**. The exported file appears in your Downloads directory.
 
 **Timeline controls:**
 - Click: select a playback position
@@ -60,6 +62,8 @@ The Linux version embeds mpv in a GTK window, so it needs a running X11/XWayland
 - Ctrl + click: set END
 - Drag the red handles: adjust START / END
 - Play / Pause: preview from the selected point and return to it on pause
+
+Downloading a time range uses yt-dlp with FFmpeg and accurate re-encoding at the cut boundaries. Progress is shown as a percentage when yt-dlp reports one, otherwise as an indeterminate activity indicator while the selected fragment is being fetched or processed.
 
 Timestamp fields support `HH:MM:SS.mmm`. Export is performed with FFmpeg using accurate seeking and re-encoding. Actual video-frame precision depends on the source media and decoder; a millisecond timestamp does not guarantee an independently decodable frame at that exact instant.
 

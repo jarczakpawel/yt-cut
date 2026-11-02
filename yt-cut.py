@@ -231,6 +231,8 @@ class YTCut(Gtk.Window):
         self.last_download_error = ""
         self.updating_entries = False
         self.last_pulse = 0
+        self.is_downloading = False
+        self.download_has_percent = False
 
         provider = Gtk.CssProvider()
         provider.load_from_data(CSS.encode())
@@ -255,6 +257,27 @@ class YTCut(Gtk.Window):
         self.cancel_btn = self.button("Anuluj", self.cancel_download)
         self.cancel_btn.set_sensitive(False)
         urlrow.pack_start(self.cancel_btn, False, False, 0)
+
+        section_row = Gtk.Box(spacing=12)
+        outer.pack_start(section_row, False, False, 0)
+        self.only_fragment = Gtk.CheckButton(label="Pobierz tylko fragment")
+        section_row.pack_start(self.only_fragment, False, False, 0)
+        section_row.pack_start(Gtk.Label(label="OD:"), False, False, 0)
+        self.fragment_from = Gtk.Entry()
+        self.fragment_from.set_width_chars(15)
+        self.fragment_from.set_text("00:00:00.000")
+        section_row.pack_start(self.fragment_from, False, False, 0)
+        section_row.pack_start(Gtk.Label(label="DO:"), False, False, 0)
+        self.fragment_to = Gtk.Entry()
+        self.fragment_to.set_width_chars(15)
+        self.fragment_to.set_text("00:01:00.000")
+        section_row.pack_start(self.fragment_to, False, False, 0)
+        for field in (self.fragment_from, self.fragment_to):
+            field.set_sensitive(False)
+        self.only_fragment.connect("toggled", lambda check: [
+            field.set_sensitive(check.get_active())
+            for field in (self.fragment_from, self.fragment_to)
+        ])
 
         self.progress = Gtk.ProgressBar()
         self.progress.set_show_text(True)
@@ -483,6 +506,11 @@ class YTCut(Gtk.Window):
         self.timeline.queue_draw()
 
     def tick(self):
+        if self.is_downloading and not self.download_has_percent:
+            self.last_pulse += 1
+            if self.last_pulse >= 3:
+                self.progress.pulse()
+                self.last_pulse = 0
         if self.duration:
             self.position_label.set_text(f"{clock(self.position_ms)} / {clock(self.duration)}")
             self.timeline.queue_draw()
@@ -609,6 +637,17 @@ class YTCut(Gtk.Window):
         if u.scheme not in ("http", "https") or not u.netloc:
             self.status.set_text("Wklej poprawny URL filmu.")
             return
+        section = None
+        if self.only_fragment.get_active():
+            try:
+                start_ms = parse_clock(self.fragment_from.get_text())
+                end_ms = parse_clock(self.fragment_to.get_text())
+                if end_ms <= start_ms:
+                    raise ValueError("DO musi być późniejsze niż OD")
+                section = f"*{clock(start_ms)}-{clock(end_ms)}"
+            except ValueError as exc:
+                self.status.set_text(f"Nieprawidłowy zakres pobierania: {exc}")
+                return
         self.job_id += 1
         self.export_id += 1
         self.stop_process(self.download_proc)
@@ -624,20 +663,26 @@ class YTCut(Gtk.Window):
         self.cancel_btn.set_sensitive(True)
         self.export_btn.set_sensitive(False)
         self.progress.set_fraction(0)
-        self.progress.set_text("Pobieranie 0%")
-        self.status.set_text("Pobieranie filmu...")
+        self.progress.set_pulse_step(0.03)
+        self.progress.set_text("Pobieranie fragmentu..." if section else "Pobieranie filmu...")
+        self.status.set_text("Pobieranie fragmentu..." if section else "Pobieranie filmu...")
+        self.is_downloading = True
+        self.download_has_percent = False
         self.last_download_error = ""
         job = self.job_id
-        threading.Thread(target=self.download_worker, args=(job, url, self.workdir), daemon=True).start()
+        threading.Thread(target=self.download_worker, args=(job, url, self.workdir, section), daemon=True).start()
 
-    def download_worker(self, job, url, directory):
+    def download_worker(self, job, url, directory, section):
         cmd = [
             YTDLP, "--no-playlist", "--no-mtime", "--newline", "--no-colors",
-            "--js-runtimes", "node", "--no-warnings",
+            "--progress", "--js-runtimes", "node", "--no-warnings",
             "-f", "bv*+ba/b", "--merge-output-format", "mkv",
             "-o", str(Path(directory) / "source.%(ext)s"),
-            "--print", "after_move:YT_CUT_FILE:%(filepath)s", url,
+            "--print", "after_move:YT_CUT_FILE:%(filepath)s",
         ]
+        if section:
+            cmd += ["--download-sections", section, "--force-keyframes-at-cuts"]
+        cmd.append(url)
         filepath = None
         errors = []
         try:
@@ -680,7 +725,7 @@ class YTCut(Gtk.Window):
             duration = round(float(info.stdout.strip()) * 1000)
             if duration <= 1:
                 raise RuntimeError("Nie można odczytać długości filmu.")
-            GLib.idle_add(self.download_done, job, filepath, duration)
+            GLib.idle_add(self.download_done, job, filepath, duration, section)
         except Exception as exc:
             if job == self.job_id:
                 GLib.idle_add(self.download_failed, job, str(exc))
@@ -693,14 +738,16 @@ class YTCut(Gtk.Window):
     def download_progress(self, job, percent):
         if job != self.job_id:
             return False
+        self.download_has_percent = True
         self.progress.set_fraction(min(1, percent / 100))
         self.progress.set_text(f"Pobieranie {percent:.1f}%")
         self.status.set_text(f"Pobieranie: {percent:.1f}%")
         return False
 
-    def download_done(self, job, path, duration):
+    def download_done(self, job, path, duration, section):
         if job != self.job_id:
             return False
+        self.is_downloading = False
         self.media = path
         self.duration = duration
         self.start = 0
@@ -711,7 +758,7 @@ class YTCut(Gtk.Window):
         self.command("loadfile", path, "replace")
         self.command("set_property", "pause", True)
         self.apply_loop()
-        self.title_label.set_text(f"Wczytano: {Path(path).name}  •  {clock(duration)}")
+        self.title_label.set_text(f"Wczytano {'fragment '+section[1:]+' • ' if section else 'film • '}{clock(duration)}")
         self.status.set_text("Gotowe. Ustaw START/KONIEC, opcjonalnie efekty i kliknij Wytnij.")
         self.download_btn.set_sensitive(True)
         self.cancel_btn.set_sensitive(False)
@@ -725,6 +772,7 @@ class YTCut(Gtk.Window):
     def download_failed(self, job, message):
         if job != self.job_id:
             return False
+        self.is_downloading = False
         self.download_btn.set_sensitive(True)
         self.cancel_btn.set_sensitive(False)
         self.progress.set_fraction(0)
@@ -733,6 +781,7 @@ class YTCut(Gtk.Window):
         return False
 
     def cancel_download(self, *_):
+        self.is_downloading = False
         self.job_id += 1
         self.stop_process(self.download_proc)
         old = self.workdir

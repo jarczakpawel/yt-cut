@@ -53,7 +53,7 @@ def parse_clock(text):
 
 class Events(QObject):
     progress = Signal(int, float, str)
-    downloaded = Signal(int, str, int, float)
+    downloaded = Signal(int, str, int, float, str)
     failed = Signal(int, str)
     exported = Signal(int, str)
 
@@ -176,6 +176,7 @@ class Window(QMainWindow):
         self.export_proc = None
         self.restoring = False
         self.last_error = ""
+        self.is_downloading = False
         self.signals = Events()
         self.signals.progress.connect(self.on_progress)
         self.signals.downloaded.connect(self.on_downloaded)
@@ -210,6 +211,25 @@ class Window(QMainWindow):
         self.cancel_button.clicked.connect(self.cancel_download)
         urlrow.addWidget(self.cancel_button)
         main.addLayout(urlrow)
+
+        section_row = QHBoxLayout()
+        self.only_fragment = QCheckBox("Pobierz tylko fragment")
+        section_row.addWidget(self.only_fragment)
+        section_row.addWidget(QLabel("OD:"))
+        self.fragment_from = QLineEdit("00:00:00.000")
+        self.fragment_from.setFixedWidth(150)
+        section_row.addWidget(self.fragment_from)
+        section_row.addWidget(QLabel("DO:"))
+        self.fragment_to = QLineEdit("00:01:00.000")
+        self.fragment_to.setFixedWidth(150)
+        section_row.addWidget(self.fragment_to)
+        section_row.addStretch()
+        self.fragment_from.setEnabled(False)
+        self.fragment_to.setEnabled(False)
+        self.only_fragment.toggled.connect(self.fragment_from.setEnabled)
+        self.only_fragment.toggled.connect(self.fragment_to.setEnabled)
+        main.addLayout(section_row)
+
         self.progress = QProgressBar()
         self.progress.setMaximum(1000)
         self.progress.setValue(0)
@@ -485,6 +505,17 @@ QCheckBox { spacing:5px; }
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             self.status.setText("Wklej poprawny URL filmu.")
             return
+        section = None
+        if self.only_fragment.isChecked():
+            try:
+                start_ms = parse_clock(self.fragment_from.text())
+                end_ms = parse_clock(self.fragment_to.text())
+                if end_ms <= start_ms:
+                    raise ValueError("DO musi być późniejsze niż OD")
+                section = f"*{clock(start_ms)}-{clock(end_ms)}"
+            except ValueError as exc:
+                self.status.setText(f"Nieprawidłowy zakres pobierania: {exc}")
+                return
         self.download_job += 1
         self.export_job += 1
         self.stop_process(self.download_proc)
@@ -496,17 +527,21 @@ QCheckBox { spacing:5px; }
         QTimer.singleShot(800, self.cleanup)
         self.download_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
-        self.progress.setValue(0)
-        self.progress.setFormat("Downloading 0%")
-        self.status.setText("Pobieranie filmu...")
+        self.progress.setRange(0, 0)
+        self.progress.setFormat("Pobieranie fragmentu..." if section else "Pobieranie filmu...")
+        self.status.setText("Pobieranie fragmentu..." if section else "Pobieranie filmu...")
+        self.is_downloading = True
         job, directory = self.download_job, self.directory
-        threading.Thread(target=self.download_worker, args=(job, url, directory), daemon=True).start()
+        threading.Thread(target=self.download_worker, args=(job, url, directory, section), daemon=True).start()
 
-    def download_worker(self, job, url, directory):
+    def download_worker(self, job, url, directory, section):
         args = [YTDLP, "--no-playlist", "--no-mtime", "--newline", "--no-colors",
-                "--js-runtimes", "node", "--no-warnings", "-f", "bv*+ba/b",
+                "--progress", "--js-runtimes", "node", "--no-warnings", "-f", "bv*+ba/b",
                 "--merge-output-format", "mkv", "-o", str(Path(directory) / "source.%(ext)s"),
-                "--print", "after_move:YT_CUT_FILE:%(filepath)s", url]
+                "--print", "after_move:YT_CUT_FILE:%(filepath)s"]
+        if section:
+            args += ["--download-sections", section, "--force-keyframes-at-cuts"]
+        args.append(url)
         errors, path = [], None
         try:
             if job != self.download_job:
@@ -553,7 +588,7 @@ QCheckBox { spacing:5px; }
                 numerator, denominator = streams[0].get("avg_frame_rate", "30/1").split("/")
                 if int(denominator):
                     fps = float(numerator) / float(denominator)
-            self.signals.downloaded.emit(job, path, duration, fps if fps > 0 else 30)
+            self.signals.downloaded.emit(job, path, duration, fps if fps > 0 else 30, section or "")
         except Exception as error:
             if job == self.download_job:
                 self.signals.failed.emit(job, str(error))
@@ -569,21 +604,24 @@ QCheckBox { spacing:5px; }
     def on_progress(self, job, fraction, name):
         if job != (self.download_job if name == "Pobieranie" else self.export_job):
             return
+        self.progress.setRange(0, 1000)
         self.progress.setValue(round(max(0, min(1, fraction)) * 1000))
         self.progress.setFormat(f"{name}: {fraction * 100:.1f}%")
         self.status.setText(f"{name}: {fraction * 100:.1f}%")
 
-    def on_downloaded(self, job, path, duration, fps):
+    def on_downloaded(self, job, path, duration, fps, section):
         if job != self.download_job:
             return
+        self.is_downloading = False
         self.media, self.duration, self.end, self.fps = path, duration, duration, fps
         self.position = self.anchor = self.start = 0
         self.player.setSource(QUrl.fromLocalFile(path))
         self.player.pause()
         self.update_fields()
         self.update_enabled()
-        self.title_text.setText(f"Załadowano: {Path(path).name}  •  {clock(duration)}")
+        self.title_text.setText(f"Wczytano {'fragment '+section[1:]+' • ' if section else 'film • '}{clock(duration)}")
         self.status.setText("Gotowe. Wybierz fragment i kliknij Wytnij.")
+        self.progress.setRange(0, 1000)
         self.progress.setValue(1000)
         self.progress.setFormat("Download complete 100%")
         self.download_button.setEnabled(True)
@@ -591,16 +629,19 @@ QCheckBox { spacing:5px; }
 
     def on_failed(self, job, message):
         if job == self.download_job:
+            self.is_downloading = False
             self.download_button.setEnabled(True)
             self.cancel_button.setEnabled(False)
             self.status.setText("Błąd pobierania: " + message[-420:])
         elif job == self.export_job:
             self.update_enabled()
             self.status.setText("Błąd eksportu: " + message[-420:])
+        self.progress.setRange(0, 1000)
         self.progress.setValue(0)
         self.progress.setFormat("Error")
 
     def cancel_download(self):
+        self.is_downloading = False
         self.download_job += 1
         self.stop_process(self.download_proc)
         self.clear_media()
@@ -652,6 +693,7 @@ QCheckBox { spacing:5px; }
         self.export_job += 1
         job = self.export_job
         self.export_button.setEnabled(False)
+        self.progress.setRange(0, 1000)
         self.progress.setValue(0)
         self.progress.setFormat("Exporting 0%")
         self.status.setText("Eksport...")
@@ -738,7 +780,6 @@ def self_check():
 def media_check():
     log = Path.cwd() / "media-check.log"
     try:
-        self_check()
         with tempfile.TemporaryDirectory(prefix="ytcut-check-") as directory:
             sample = str(Path(directory) / "sample.mp4")
             out = str(Path(directory) / "result.mp4")

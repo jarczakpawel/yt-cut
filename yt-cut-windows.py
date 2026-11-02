@@ -58,6 +58,13 @@ class Events(QObject):
     exported = Signal(int, str)
 
 
+def human_time(ms):
+    h, remainder = divmod(max(0, int(ms)), 3600000)
+    m, remainder = divmod(remainder, 60000)
+    sec, millis = divmod(remainder, 1000)
+    return f"{h} h {m} min {sec}{f'.{millis:03d}' if millis else ''} s"
+
+
 class Timeline(QWidget):
     def __init__(self, window):
         super().__init__()
@@ -179,6 +186,11 @@ class Window(QMainWindow):
         self.is_downloading = False
         self.download_has_percent = False
         self.download_started_at = 0.0
+        self.progress_first_at = 0.0
+        self.progress_last_at = 0.0
+        self.progress_first_value = 0.0
+        self.progress_value = 0.0
+        self.progress_display_at = -1
         self.signals = Events()
         self.signals.progress.connect(self.on_progress)
         self.signals.downloaded.connect(self.on_downloaded)
@@ -369,7 +381,7 @@ QCheckBox { spacing:5px; }
             end = parse_clock(self.fragment_to.text())
             if end <= begin:
                 raise ValueError("Invalid time range")
-            self.fragment_duration_label.setText(f"Długość: {clock(end - begin)}")
+            self.fragment_duration_label.setText(f"Długość: {human_time(end - begin)}")
         except ValueError:
             self.fragment_duration_label.setText("Nieprawidłowy zakres")
 
@@ -407,6 +419,18 @@ QCheckBox { spacing:5px; }
             self.status.setText(f"Błąd odtwarzacza: {message}")
 
     def tick(self):
+        if self.is_downloading and self.download_has_percent and int(time.monotonic()) != self.progress_display_at:
+            now = time.monotonic()
+            elapsed = now - self.progress_first_at
+            delta = self.progress_value - self.progress_first_value
+            eta = elapsed * (1 - self.progress_value) / delta if delta > .02 and elapsed >= 3 and now - self.progress_last_at < 10 else None
+            remaining = f"~{human_time(round(eta) * 1000)}" if eta is not None else "obliczanie..."
+            if self.progress_value >= .99:
+                remaining = "finalizacja..."
+            display = f"{self.progress_value * 100:.1f}%   |   czas: {human_time(int(elapsed) * 1000)}   |   pozostało: {remaining}"
+            self.progress.setFormat(display)
+            self.status.setText(display)
+            self.progress_display_at = int(now)
         if self.is_downloading and not self.download_has_percent:
             elapsed = round(time.monotonic() - self.download_started_at)
             self.progress.setFormat(f"Downloading fragment... {elapsed} s" if self.only_fragment.isChecked()
@@ -511,9 +535,10 @@ QCheckBox { spacing:5px; }
     def stop_process(self, process):
         if process and process.poll() is None:
             try:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                               capture_output=True, creationflags=CREATE_NO_WINDOW, timeout=4)
+            except (OSError, subprocess.TimeoutExpired):
                 process.terminate()
-            except OSError:
-                pass
 
     def cleanup(self):
         remaining = []
@@ -558,6 +583,8 @@ QCheckBox { spacing:5px; }
         self.is_downloading = True
         self.download_has_percent = False
         self.download_started_at = time.monotonic()
+        self.progress_first_at = 0.0
+        self.progress_display_at = -1
         job, directory = self.download_job, self.directory
         threading.Thread(target=self.download_worker, args=(job, url, directory, section), daemon=True).start()
 
@@ -567,7 +594,8 @@ QCheckBox { spacing:5px; }
                 "--merge-output-format", "mkv", "-o", str(Path(directory) / "source.%(ext)s"),
                 "--print", "after_move:YT_CUT_FILE:%(filepath)s"]
         if section:
-            args += ["--download-sections", section, "--force-keyframes-at-cuts",
+            args += ["--download-sections", section,
+                     "-S", "proto:m3u8,vcodec:h264",
                      "--downloader-args", "ffmpeg_o:-progress pipe:2 -nostats"]
         args.append(url)
         errors, path = [], None
@@ -594,7 +622,7 @@ QCheckBox { spacing:5px; }
                 if section and line.startswith("out_time_us="):
                     try:
                         micros = int(line.split("=", 1)[1])
-                        self.signals.progress.emit(job, max(0, min(.99, micros / section_us)), "Pobieranie")
+                        self.signals.progress.emit(job, max(0, min(.70, micros / section_us * .70)), "Pobieranie")
                     except ValueError:
                         pass
                 elif not section:
@@ -611,6 +639,36 @@ QCheckBox { spacing:5px; }
                 if not files:
                     raise RuntimeError("Brak pobranego pliku")
                 path = str(max(files, key=lambda x: x.stat().st_size))
+            if section:
+                preview = str(Path(directory) / "preview.mkv")
+                encode = [FFMPEG, "-hide_banner", "-nostdin", "-y", "-loglevel", "error",
+                          "-progress", "pipe:1", "-i", path, "-t", f"{section_us / 1_000_000:.3f}",
+                          "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264",
+                          "-preset", "ultrafast", "-crf", "19", "-pix_fmt", "yuv420p",
+                          "-c:a", "aac", "-b:a", "192k", "-f", "matroska", preview]
+                self.signals.progress.emit(job, .70, "Pobieranie")
+                proc = subprocess.Popen(encode, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                        text=True, errors="replace", creationflags=CREATE_NO_WINDOW)
+                if job != self.download_job:
+                    self.stop_process(proc)
+                else:
+                    self.download_proc = proc
+                for raw in proc.stdout:
+                    line = raw.strip()
+                    if line.startswith("out_time_us="):
+                        try:
+                            micros = int(line.split("=", 1)[1])
+                            self.signals.progress.emit(job, min(.99, .70 + micros / section_us * .29), "Pobieranie")
+                        except ValueError:
+                            pass
+                    elif line and not line.startswith(("progress=", "frame=", "fps=", "stream_", "bitrate=", "total_size=", "out_time=", "out_time_ms=", "dup_frames=", "drop_frames=", "speed=", "quality=")):
+                        errors.append(line)
+                if proc.wait() != 0:
+                    raise RuntimeError("\n".join(errors[-6:]))
+                if job != self.download_job:
+                    return
+                Path(path).unlink(missing_ok=True)
+                path = preview
             probe = subprocess.run([FFPROBE, "-v", "error", "-select_streams", "v:0",
                                    "-show_entries", "stream=avg_frame_rate", "-show_entries", "format=duration",
                                    "-of", "json", path], capture_output=True, text=True,
@@ -644,7 +702,14 @@ QCheckBox { spacing:5px; }
         if job != (self.download_job if name == "Pobieranie" else self.export_job):
             return
         if name == "Pobieranie":
+            now = time.monotonic()
+            if not self.download_has_percent or fraction + .1 < self.progress_value:
+                self.progress_first_at = now
+                self.progress_first_value = fraction
             self.download_has_percent = True
+            self.progress_last_at = now
+            self.progress_value = fraction
+            self.progress_display_at = -1
         self.progress.setRange(0, 1000)
         self.progress.setValue(round(max(0, min(1, fraction)) * 1000))
         self.progress.setFormat(f"{name}: {fraction * 100:.1f}%")

@@ -12,6 +12,7 @@ import math
 import re
 import shutil
 import socket
+import signal
 import time
 import subprocess
 import tempfile
@@ -61,6 +62,13 @@ def parse_clock(value):
             raise ValueError("Nieprawidłowy czas")
         total += number * (60 ** i)
     return int(round(total * 1000))
+
+def human_time(ms):
+    h, remainder = divmod(max(0, int(ms)), 3600000)
+    m, remainder = divmod(remainder, 60000)
+    sec, millis = divmod(remainder, 1000)
+    return f"{h} h {m} min {sec}{f'.{millis:03d}' if millis else ''} s"
+
 
 class Timeline(Gtk.DrawingArea):
     def __init__(self, app):
@@ -235,6 +243,11 @@ class YTCut(Gtk.Window):
         self.is_downloading = False
         self.download_has_percent = False
         self.download_started_at = 0.0
+        self.progress_first_at = 0.0
+        self.progress_last_at = 0.0
+        self.progress_first_value = 0.0
+        self.progress_value = 0.0
+        self.progress_display_at = -1
 
         provider = Gtk.CssProvider()
         provider.load_from_data(CSS.encode())
@@ -410,7 +423,7 @@ class YTCut(Gtk.Window):
             end = parse_clock(self.fragment_to.get_text())
             if end <= begin:
                 raise ValueError("Nieprawidłowy zakres")
-            self.fragment_duration_label.set_text(f"Długość: {clock(end - begin)}")
+            self.fragment_duration_label.set_text(f"Długość: {human_time(end - begin)}")
         except ValueError:
             self.fragment_duration_label.set_text("Nieprawidłowy zakres")
 
@@ -536,6 +549,18 @@ class YTCut(Gtk.Window):
             elapsed = round(time.monotonic() - self.download_started_at)
             self.progress.set_text(f"Pobieranie fragmentu... {elapsed} s" if self.only_fragment.get_active()
                                    else f"Łączenie... {elapsed} s")
+        if self.is_downloading and self.download_has_percent and int(time.monotonic()) != self.progress_display_at:
+            now = time.monotonic()
+            elapsed = now - self.progress_first_at
+            delta = (self.progress_value - self.progress_first_value) / 100
+            eta = elapsed * (1 - self.progress_value / 100) / delta if delta > .02 and elapsed >= 3 and now - self.progress_last_at < 10 else None
+            remaining = f"~{human_time(round(eta) * 1000)}" if eta is not None else "obliczanie..."
+            if self.progress_value >= 99:
+                remaining = "finalizacja..."
+            display = f"{self.progress_value:.1f}%   |   czas: {human_time(int(elapsed) * 1000)}   |   pozostało: {remaining}"
+            self.progress.set_text(display)
+            self.status.set_text(display)
+            self.progress_display_at = int(now)
         if self.duration:
             self.position_label.set_text(f"{clock(self.position_ms)} / {clock(self.duration)}")
             self.timeline.queue_draw()
@@ -652,7 +677,10 @@ class YTCut(Gtk.Window):
     def stop_process(self, proc):
         if proc and proc.poll() is None:
             try:
-                proc.terminate()
+                if os.getpgid(proc.pid) == proc.pid:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                else:
+                    proc.terminate()
             except OSError:
                 pass
 
@@ -694,6 +722,8 @@ class YTCut(Gtk.Window):
         self.is_downloading = True
         self.download_has_percent = False
         self.download_started_at = time.monotonic()
+        self.progress_first_at = 0.0
+        self.progress_display_at = -1
         self.last_download_error = ""
         job = self.job_id
         threading.Thread(target=self.download_worker, args=(job, url, self.workdir, section), daemon=True).start()
@@ -707,7 +737,8 @@ class YTCut(Gtk.Window):
             "--print", "after_move:YT_CUT_FILE:%(filepath)s",
         ]
         if section:
-            cmd += ["--download-sections", section, "--force-keyframes-at-cuts",
+            cmd += ["--download-sections", section,
+                    "-S", "proto:m3u8,vcodec:h264",
                     "--downloader-args", "ffmpeg_o:-progress pipe:2 -nostats"]
         cmd.append(url)
         filepath = None
@@ -719,7 +750,8 @@ class YTCut(Gtk.Window):
         try:
             if job != self.job_id:
                 return
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1)
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, errors="replace", bufsize=1, start_new_session=True)
             if job != self.job_id:
                 self.stop_process(proc)
             else:
@@ -736,7 +768,7 @@ class YTCut(Gtk.Window):
                 if section and line.startswith("out_time_us="):
                     try:
                         micros = int(line.split("=", 1)[1])
-                        GLib.idle_add(self.download_progress, job, max(0.0, min(99.0, micros / section_us * 100.0)))
+                        GLib.idle_add(self.download_progress, job, max(0.0, min(70.0, micros / section_us * 70.0)))
                     except ValueError:
                         pass
                 elif not section:
@@ -753,6 +785,36 @@ class YTCut(Gtk.Window):
                 if not candidates:
                     raise RuntimeError("Nie znaleziono pobranego pliku.")
                 filepath = str(max(candidates, key=lambda p: p.stat().st_size))
+            if section:
+                preview = str(Path(directory) / "preview.mkv")
+                encode = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel", "error",
+                          "-progress", "pipe:1", "-i", filepath, "-t", f"{section_us / 1_000_000:.3f}",
+                          "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264",
+                          "-preset", "ultrafast", "-crf", "19", "-pix_fmt", "yuv420p",
+                          "-c:a", "aac", "-b:a", "192k", "-f", "matroska", preview]
+                GLib.idle_add(self.download_progress, job, 70.0)
+                proc = subprocess.Popen(encode, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                        text=True, errors="replace", bufsize=1, start_new_session=True)
+                if job != self.job_id:
+                    self.stop_process(proc)
+                else:
+                    self.download_proc = proc
+                for line in proc.stdout:
+                    line = line.strip()
+                    if line.startswith("out_time_us="):
+                        try:
+                            micros = int(line.split("=", 1)[1])
+                            GLib.idle_add(self.download_progress, job, min(99.0, 70.0 + micros / section_us * 29.0))
+                        except ValueError:
+                            pass
+                    elif line and not line.startswith(("progress=", "frame=", "fps=", "stream_", "bitrate=", "total_size=", "out_time=", "out_time_ms=", "dup_frames=", "drop_frames=", "speed=", "quality=")):
+                        errors.append(line)
+                if proc.wait() != 0:
+                    raise RuntimeError("\n".join(errors[-6:]))
+                if job != self.job_id:
+                    return
+                Path(filepath).unlink(missing_ok=True)
+                filepath = preview
             info = subprocess.run(
                 ["ffprobe", "-v", "error", "-show_entries", "format=duration",
                  "-of", "default=noprint_wrappers=1:nokey=1", filepath],
@@ -776,10 +838,15 @@ class YTCut(Gtk.Window):
     def download_progress(self, job, percent):
         if job != self.job_id:
             return False
+        now = time.monotonic()
+        if not self.download_has_percent or percent + 10 < self.progress_value:
+            self.progress_first_at = now
+            self.progress_first_value = percent
         self.download_has_percent = True
+        self.progress_last_at = now
+        self.progress_value = percent
+        self.progress_display_at = -1
         self.progress.set_fraction(min(1, percent / 100))
-        self.progress.set_text(f"Pobieranie {percent:.1f}%")
-        self.status.set_text(f"Pobieranie: {percent:.1f}%")
         return False
 
     def download_done(self, job, path, duration, section):

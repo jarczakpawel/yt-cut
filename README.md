@@ -65,9 +65,11 @@ The Linux version embeds mpv in a GTK window, so it needs a running X11/XWayland
 - Drag the red handles: adjust START / END
 - Play / Pause: preview from the selected point and return to it on pause
 
-Downloading a time range uses yt-dlp with FFmpeg and accurate re-encoding at the cut boundaries. The interval's progress percentage is calculated from the timestamp of the encoded output reported by FFmpeg, not from the bytes transferred over the network. An animated indicator with elapsed time is shown until encoding starts producing progress reports. Percentage values are capped at 99% until the resulting file has been finalized.
+For partial downloads, YT Cut prefers the available YouTube HLS stream and first downloads only the requested section without re-encoding. The fragment is then processed locally with FFmpeg to produce the precise requested duration. If HLS is unavailable, yt-dlp can fall back to HTTPS; performance depends on the source. This reduces the effect of YouTube's throttling of unbounded FFmpeg HTTP requests.
 
-YouTube may throttle FFmpeg's HTTP seeking for long source videos. Downloading a short fragment can therefore still be slow, and the application cannot reliably predict a completion time.
+The progress indicator reports the download stage (0-70%) and local processing (70-99%). An approximate time remaining is displayed after sufficient progress has been observed. It starts counting when percentages become available, not during initial extraction. ETA may be unavailable if progress stalls. The final 100% is shown only after the media file is finalized.
+
+YouTube network throttling and video encoding performance vary by video, server and computer; the ETA is an estimate, not a guarantee.
 
 Timestamp fields support `HH:MM:SS.mmm`. Export is performed with FFmpeg using accurate seeking and re-encoding. Actual video-frame precision depends on the source media and decoder; a millisecond timestamp does not guarantee an independently decodable frame at that exact instant.
 

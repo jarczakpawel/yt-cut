@@ -34,6 +34,14 @@ jobs:
           Copy-Item (Join-Path $ffmpeg.DirectoryName 'ffprobe.exe') tools-bin\ffprobe.exe
           Invoke-WebRequest -Uri 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' -OutFile tools-bin\yt-dlp.exe
           Copy-Item (Get-Command node.exe).Source tools-bin\node.exe
+          $mpvUri = 'https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261102/mpv-dev-x86_64-20261102-git-2137d21b2e.7z'
+          $mpvArchive = "$env:RUNNER_TEMP\mpv-dev.7z"
+          Invoke-WebRequest -Uri $mpvUri -OutFile $mpvArchive
+          $mpvHash = (Get-FileHash $mpvArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($mpvHash -ne '5ca801552661c18fa0b1edfd41dba6e5d9aa9d6c42dbe3fb91a45eb79f16') { throw "libmpv archive checksum mismatch: $mpvHash" }
+          & 'C:\Program Files\7-Zip\7z.exe' e -y "-o$env:RUNNER_TEMP\mpv-dev" $mpvArchive libmpv-2.dll
+          if ($LASTEXITCODE -ne 0) { throw 'Extracting libmpv failed' }
+          Copy-Item "$env:RUNNER_TEMP\mpv-dev\libmpv-2.dll" tools-bin\libmpv-2.dll
           & tools-bin\ffmpeg.exe -version | Select-Object -First 1
           & tools-bin\ffprobe.exe -version | Select-Object -First 1
           & tools-bin\yt-dlp.exe --version
@@ -43,12 +51,12 @@ jobs:
       - name: Bundle self-contained application
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean --windowed --onedir --name YT-Cut --icon assets/yt-cut.ico --add-binary 'tools-bin/ffmpeg.exe;tools' --add-binary 'tools-bin/ffprobe.exe;tools' --add-binary 'tools-bin/yt-dlp.exe;tools' --add-binary 'tools-bin/node.exe;tools' --collect-all PySide6.QtMultimedia --collect-all PySide6.QtMultimediaWidgets yt-cut-windows.py
+          python -m PyInstaller --noconfirm --clean --windowed --onedir --name YT-Cut --icon assets/yt-cut.ico --add-binary 'tools-bin/ffmpeg.exe;tools' --add-binary 'tools-bin/ffprobe.exe;tools' --add-binary 'tools-bin/yt-dlp.exe;tools' --add-binary 'tools-bin/node.exe;tools' --add-binary 'tools-bin/libmpv-2.dll;tools' yt-cut-windows.py
       - name: Verify packaged executables
         shell: pwsh
         run: |
           $root = 'dist\YT-Cut'
-          foreach ($name in @('ffmpeg.exe','ffprobe.exe','yt-dlp.exe','node.exe')) {
+          foreach ($name in @('ffmpeg.exe','ffprobe.exe','yt-dlp.exe','node.exe','libmpv-2.dll')) {
             if (-not (Test-Path "$root\_internal\tools\$name")) { throw "Missing bundled tool: $name" }
           }
           $result = Start-Process -FilePath (Resolve-Path "$root\YT-Cut.exe").Path -ArgumentList "--self-check" -Wait -PassThru

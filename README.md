@@ -12,7 +12,7 @@ A lightweight desktop application for downloading and precisely trimming YouTube
 2. Extract the ZIP archive.
 3. Open **YT-Cut.exe** inside the extracted **YT-Cut** directory.
 
-The Windows package includes the application, FFmpeg, FFprobe, yt-dlp and Node.js. No separate Python installation is required. Keep the extracted files together.
+The Windows package includes the application, FFmpeg, FFprobe, yt-dlp, Node.js and libmpv. No separate Python installation is required. Keep the extracted files together.
 
 Windows may display a Microsoft SmartScreen warning because the executable is not digitally signed.
 
@@ -82,7 +82,7 @@ Timestamp fields support `HH:MM:SS.mmm`. Export is performed with FFmpeg using a
 | | Windows | Linux |
 | --- | --- | --- |
 | UI | PySide6 (Qt) | GTK 3 |
-| Video preview | Qt Multimedia (software decoding, H.264/AAC proxy for VP9/Opus sources) | mpv |
+| Video preview | libmpv in a native embedded HWND | mpv |
 | Download | yt-dlp | yt-dlp |
 | Export | FFmpeg | FFmpeg |
 | JavaScript runtime | Bundled Node.js | Node.js |
@@ -98,6 +98,7 @@ Windows distributions include third-party binaries, subject to their respective 
 - [FFmpeg and its licensing](https://ffmpeg.org/legal.html) - Windows builds from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/)
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp)
 - [Node.js](https://github.com/nodejs/node)
+- [mpv / libmpv](https://mpv.io/installation/) - Windows binary by [shinchiro](https://github.com/shinchiro/mpv-winbuild-cmake/releases)
 - [Qt / PySide6](https://doc.qt.io/qtforpython-6/)
 
-On Windows, playback uses a CPU-rendered video surface instead of the native Qt video widget. Videos in VP9/Opus or other non-MP4 formats are converted to a smaller H.264/AAC preview in the background before playback. The original source remains unchanged and is used for final export and cropping.
+On Windows, the player is embedded into a native Qt widget using libmpv's HWND embedding. VP9/Opus and other supported formats play directly without making a converted proxy. The original source is preserved for export and cropping.

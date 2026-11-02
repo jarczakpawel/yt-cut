@@ -56,8 +56,8 @@ jobs:
           foreach ($name in @('ffmpeg.exe','ffprobe.exe','yt-dlp.exe','node.exe')) {
             if (-not (Test-Path "$root\_internal\tools\$name")) { throw "Missing bundled tool: $name" }
           }
-          & "$root\YT-Cut.exe" --self-check
-          if ($LASTEXITCODE -ne 0) { throw "Windows self-check returned $LASTEXITCODE" }
+          $result = Start-Process -FilePath (Resolve-Path "$root\YT-Cut.exe").Path -ArgumentList "--self-check" -Wait -PassThru
+          if ($result.ExitCode -ne 0) { throw "Windows self-check returned $($result.ExitCode)" }
       - name: Create portable ZIP
         shell: pwsh
         run: Compress-Archive -Path dist\YT-Cut -DestinationPath YT-Cut-Windows-x64.zip -CompressionLevel Optimal

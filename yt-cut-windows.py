@@ -168,7 +168,7 @@ class Timeline(QWidget):
 class Window(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("YT Cut")
+        self.setWindowTitle("YT Cut v1.0.15")
         self.resize(1060, 790)
         self.setMinimumSize(765, 630)
         self.duration = 0
@@ -422,9 +422,8 @@ QCheckBox { spacing:5px; }
         if self.player is None:
             return
         if self.player.error:
-            error = self.player.error
-            self.player.error = ""
-            self.status.setText(f"Błąd silnika mpv: {error}")
+            self.status.setText(
+                f"Błąd silnika mpv: {self.player.error} | diagnostyka: {self.player.startup_log}")
         if self.media and self.player.playbackState() == MpvPlayer.PlayingState:
             self.position_changed(self.player.position())
             if self.player.position() == 0 and time.monotonic() - getattr(self, "play_requested_at", time.monotonic()) > 5:
@@ -474,6 +473,11 @@ QCheckBox { spacing:5px; }
 
     def play_pause(self):
         if not self.media:
+            return
+        if not self.player.ready:
+            self.status.setText(
+                f"mpv nie został uruchomiony: {self.player.error or 'inicjalizacja'} | "
+                f"{self.player.startup_log}")
             return
         if self.player.playbackState() == MpvPlayer.PlayingState:
             self.pause_restore()

@@ -102,4 +102,4 @@ Windows distributions include third-party binaries, subject to their respective 
 - [mpv / libmpv](https://mpv.io/installation/) - Windows binary by [shinchiro](https://github.com/shinchiro/mpv-winbuild-cmake/releases)
 - [Qt / PySide6](https://doc.qt.io/qtforpython-6/)
 
-On Windows, the player is embedded into a native Qt widget using libmpv's HWND embedding, initialized only after the window is shown. VP9/Opus and other supported formats play directly without making a converted proxy. mpv diagnostics are saved under `%LOCALAPPDATA%\YT-Cut\mpv.log`. The original source is preserved for export and cropping.
+On Windows, the player is embedded into a native Qt widget using libmpv's HWND embedding, initialized only after the window is shown. VP9/Opus and other supported formats play directly without making a converted proxy. The player writes `%LOCALAPPDATA%\YT-Cut\startup.log` before loading libmpv, so startup failures can be diagnosed even without an mpv.log. After initialization, mpv writes `%LOCALAPPDATA%\YT-Cut\mpv.log`. The original source is preserved for export and cropping.

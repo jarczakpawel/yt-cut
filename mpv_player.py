@@ -26,7 +26,7 @@ class MpvPlayer:
     PausedState = 2
 
     def __init__(self, widget):
-        self.hwnd = int(widget.winId())
+        self.hwnd = int(widget.winId()) & 0xFFFFFFFF
         self.actions = queue.Queue()
         self._position = 0
         self._playing = False
@@ -35,7 +35,12 @@ class MpvPlayer:
         self.state = {}
         self.log_path = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "YT-Cut" / "mpv.log"
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.startup_log = self.log_path.with_name("startup.log")
+        self.startup_log.write_text(
+            f"Starting embedded mpv\nDLL: {DLL}\nPresent: {DLL.is_file()}\n"
+            f"HWND: {self.hwnd}\n", encoding="utf-8")
         self._closed = False
+        self._dll_directory = None
         self.worker = threading.Thread(target=self._run, daemon=True)
         self.worker.start()
 
@@ -75,8 +80,8 @@ class MpvPlayer:
             if not DLL.is_file():
                 raise RuntimeError(f"Missing libmpv: {DLL}")
             if os.name == "nt":
-                os.add_dll_directory(str(DLL.parent))
-            lib = ctypes.CDLL(str(DLL))
+                self._dll_directory = os.add_dll_directory(str(DLL.parent))
+            lib = ctypes.CDLL(str(DLL), **({"winmode": 0x1100} if os.name == "nt" else {}))
             lib.mpv_create.restype = ctypes.c_void_p
             lib.mpv_set_option_string.argtypes = (ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p)
             lib.mpv_set_option_string.restype = ctypes.c_int
@@ -113,6 +118,8 @@ class MpvPlayer:
                 if lib.mpv_initialize(handle) < 0:
                     raise RuntimeError("mpv_initialize failed")
                 self.ready = True
+                with self.startup_log.open("a", encoding="utf-8") as out:
+                    out.write("mpv_initialize: OK\n")
 
                 def command(*values):
                     arguments = (ctypes.c_char_p * (len(values) + 1))(
@@ -161,6 +168,11 @@ class MpvPlayer:
             finally:
                 lib.mpv_terminate_destroy(handle)
         except Exception as exc:
-            self.error = str(exc)
+            self.error = f"{type(exc).__name__}: {exc}"
             self.ready = False
+            with self.startup_log.open("a", encoding="utf-8") as out:
+                out.write(f"ERROR: {self.error}\n")
+        finally:
+            if self._dll_directory is not None:
+                self._dll_directory.close()
 

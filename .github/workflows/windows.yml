@@ -38,7 +38,7 @@ jobs:
           $mpvArchive = "$env:RUNNER_TEMP\mpv-dev.7z"
           Invoke-WebRequest -Uri $mpvUri -OutFile $mpvArchive
           $mpvHash = (Get-FileHash $mpvArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($mpvHash -ne '5ca801552661c18fa0b1edfd41dba6e5d9aa9d6c42dbe3fb91a45eb79f16') { throw "libmpv archive checksum mismatch: $mpvHash" }
+          if ($mpvHash -ne '5ca801552661c18fa0b1edfd41dba6e5d9aa9d6d3d6c42dbe3fb91a45eb79f16') { throw "libmpv archive checksum mismatch: $mpvHash" }
           & 'C:\Program Files\7-Zip\7z.exe' e -y "-o$env:RUNNER_TEMP\mpv-dev" $mpvArchive libmpv-2.dll
           if ($LASTEXITCODE -ne 0) { throw 'Extracting libmpv failed' }
           Copy-Item "$env:RUNNER_TEMP\mpv-dev\libmpv-2.dll" tools-bin\libmpv-2.dll

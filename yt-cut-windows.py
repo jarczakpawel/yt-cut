@@ -9,6 +9,7 @@ import time
 import threading
 from pathlib import Path
 from urllib.parse import urlparse
+from hls_clip import download as download_hls, FastUnavailable
 
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal, QObject, QRectF, QPointF
 from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
@@ -186,6 +187,7 @@ class Window(QMainWindow):
         self.is_downloading = False
         self.download_has_percent = False
         self.download_started_at = 0.0
+        self.download_phase = "Pobieranie"
         self.progress_first_at = 0.0
         self.progress_last_at = 0.0
         self.progress_first_value = 0.0
@@ -423,11 +425,12 @@ QCheckBox { spacing:5px; }
             now = time.monotonic()
             elapsed = now - self.progress_first_at
             delta = self.progress_value - self.progress_first_value
-            eta = elapsed * (1 - self.progress_value) / delta if delta > .02 and elapsed >= 3 and now - self.progress_last_at < 10 else None
+            goal = .70 if self.download_phase == "Pobieranie segmentów" else .99 if self.download_phase == "Kodowanie lokalne" else 1
+            eta = elapsed * (goal - self.progress_value) / delta if delta > .02 and elapsed >= 3 and now - self.progress_last_at < 10 else None
             remaining = f"~{human_time(round(eta) * 1000)}" if eta is not None else "obliczanie..."
             if self.progress_value >= .99:
                 remaining = "finalizacja..."
-            display = f"{self.progress_value * 100:.1f}%   |   czas: {human_time(int(elapsed) * 1000)}   |   pozostało: {remaining}"
+            display = f"{self.download_phase}: {self.progress_value * 100:.1f}%   |   czas: {human_time(int(elapsed) * 1000)}   |   ETA etapu: {remaining}"
             self.progress.setFormat(display)
             self.status.setText(display)
             self.progress_display_at = int(now)
@@ -583,99 +586,110 @@ QCheckBox { spacing:5px; }
         self.is_downloading = True
         self.download_has_percent = False
         self.download_started_at = time.monotonic()
+        self.download_phase = "Pobieranie"
         self.progress_first_at = 0.0
         self.progress_display_at = -1
         job, directory = self.download_job, self.directory
         threading.Thread(target=self.download_worker, args=(job, url, directory, section), daemon=True).start()
 
     def download_worker(self, job, url, directory, section):
-        args = [YTDLP, "--no-playlist", "--no-mtime", "--newline", "--no-colors",
-                "--progress", "--js-runtimes", "node", "--no-warnings", "-f", "bv*+ba/b",
-                "--merge-output-format", "mkv", "-o", str(Path(directory) / "source.%(ext)s"),
-                "--print", "after_move:YT_CUT_FILE:%(filepath)s"]
+        path = None
+        errors = []
+        start_ms = end_ms = None
         if section:
-            args += ["--download-sections", section,
-                     "-S", "proto:m3u8,vcodec:h264",
-                     "--downloader-args", "ffmpeg_o:-progress pipe:2 -nostats"]
-        args.append(url)
-        errors, path = [], None
-        section_us = None
-        if section:
-            begin, end = section[1:].split("-", 1)
-            section_us = (parse_clock(end) - parse_clock(begin)) * 1000
+            a, b = section[1:].split("-", 1)
+            start_ms, end_ms = parse_clock(a), parse_clock(b)
         try:
             if job != self.download_job:
                 return
-            proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    text=True, errors="replace", creationflags=CREATE_NO_WINDOW)
-            if job != self.download_job:
-                self.stop_process(proc)
-            else:
-                self.download_proc = proc
-            for raw in proc.stdout:
-                line = raw.strip()
-                if line.startswith("YT_CUT_FILE:"):
-                    path = line.removeprefix("YT_CUT_FILE:").strip()
-                if line:
-                    errors.append(line)
-                    errors = errors[-12:]
-                if section and line.startswith("out_time_us="):
-                    try:
-                        micros = int(line.split("=", 1)[1])
-                        self.signals.progress.emit(job, max(0, min(.70, micros / section_us * .70)), "Pobieranie")
-                    except ValueError:
-                        pass
-                elif not section:
-                    found = re.search(r"\[download\]\s+(\d+(?:\.\d+)?)%", line)
-                    if found:
-                        self.signals.progress.emit(job, float(found.group(1)) / 100, "Pobieranie")
-            rc = proc.wait()
-            if job != self.download_job:
-                return
-            if rc:
-                raise RuntimeError("\n".join(errors[-5:]))
-            if not path or not Path(path).is_file():
-                files = [p for p in Path(directory).glob("source.*") if p.is_file() and p.suffix not in (".part", ".ytdl")]
-                if not files:
-                    raise RuntimeError("Brak pobranego pliku")
-                path = str(max(files, key=lambda x: x.stat().st_size))
             if section:
-                preview = str(Path(directory) / "preview.mkv")
-                encode = [FFMPEG, "-hide_banner", "-nostdin", "-y", "-loglevel", "error",
-                          "-progress", "pipe:1", "-i", path, "-t", f"{section_us / 1_000_000:.3f}",
-                          "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264",
-                          "-preset", "ultrafast", "-crf", "19", "-pix_fmt", "yuv420p",
-                          "-c:a", "aac", "-b:a", "192k", "-f", "matroska", preview]
-                self.signals.progress.emit(job, .70, "Pobieranie")
-                proc = subprocess.Popen(encode, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                try:
+                    path = download_hls(
+                        url, start_ms, end_ms, directory, YTDLP, FFMPEG,
+                        lambda percent, phase: self.signals.progress.emit(job, percent / 100, phase),
+                        lambda: job != self.download_job,
+                        lambda proc: setattr(self, "download_proc", proc) if job == self.download_job else self.stop_process(proc),
+                    )
+                    self.signals.progress.emit(job, .99, "Finalizacja")
+                except FastUnavailable:
+                    self.signals.progress.emit(job, 0, "Pobieranie")
+            if path is None:
+                args = [YTDLP, "--no-playlist", "--no-mtime", "--newline", "--no-colors",
+                        "--progress", "--js-runtimes", "node", "--no-warnings",
+                        "-f", "bv*+ba/b", "--merge-output-format", "mkv",
+                        "-o", str(Path(directory) / "source.%(ext)s"),
+                        "--print", "after_move:YT_CUT_FILE:%(filepath)s"]
+                if section:
+                    args += ["--download-sections", section, "-S", "proto:m3u8,vcodec:h264",
+                             "--downloader-args", "ffmpeg_o:-progress pipe:2 -nostats"]
+                args.append(url)
+                proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                         text=True, errors="replace", creationflags=CREATE_NO_WINDOW)
-                if job != self.download_job:
-                    self.stop_process(proc)
-                else:
-                    self.download_proc = proc
+                self.download_proc = proc
                 for raw in proc.stdout:
                     line = raw.strip()
-                    if line.startswith("out_time_us="):
+                    if line.startswith("YT_CUT_FILE:"):
+                        path = line.removeprefix("YT_CUT_FILE:").strip()
+                    if line:
+                        errors.append(line)
+                        errors = errors[-15:]
+                    if section and line.startswith("out_time_us="):
                         try:
-                            micros = int(line.split("=", 1)[1])
-                            self.signals.progress.emit(job, min(.99, .70 + micros / section_us * .29), "Pobieranie")
+                            value = int(line.split("=", 1)[1])
+                            self.signals.progress.emit(job, min(.70, value / ((end_ms - start_ms) * 1000) * .70), "Pobieranie")
                         except ValueError:
                             pass
-                    elif line and not line.startswith(("progress=", "frame=", "fps=", "stream_", "bitrate=", "total_size=", "out_time=", "out_time_ms=", "dup_frames=", "drop_frames=", "speed=", "quality=")):
-                        errors.append(line)
-                if proc.wait() != 0:
+                    elif not section:
+                        found = re.search(r"\[download\]\s+(\d+(?:\.\d+)?)%", line)
+                        if found:
+                            self.signals.progress.emit(job, float(found.group(1)) / 100, "Pobieranie")
+                if proc.wait():
                     raise RuntimeError("\n".join(errors[-6:]))
                 if job != self.download_job:
                     return
-                Path(path).unlink(missing_ok=True)
-                path = preview
-            probe = subprocess.run([FFPROBE, "-v", "error", "-select_streams", "v:0",
-                                   "-show_entries", "stream=avg_frame_rate", "-show_entries", "format=duration",
-                                   "-of", "json", path], capture_output=True, text=True,
-                                   creationflags=CREATE_NO_WINDOW, timeout=30)
+                if not path or not Path(path).is_file():
+                    files = [file for file in Path(directory).glob("source.*")
+                             if file.is_file() and file.suffix not in (".part", ".ytdl")]
+                    if not files:
+                        raise RuntimeError("Brak pobranego pliku")
+                    path = str(max(files, key=lambda file: file.stat().st_size))
+                if section:
+                    preview = str(Path(directory) / "preview.mkv")
+                    args = [FFMPEG, "-hide_banner", "-nostdin", "-y", "-loglevel", "error",
+                            "-progress", "pipe:1", "-i", path,
+                            "-t", f"{(end_ms - start_ms) / 1000:.3f}",
+                            "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264",
+                            "-preset", "ultrafast", "-crf", "19", "-pix_fmt", "yuv420p",
+                            "-c:a", "aac", "-b:a", "192k", "-f", "matroska", preview]
+                    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                            text=True, errors="replace", creationflags=CREATE_NO_WINDOW)
+                    self.download_proc = proc
+                    self.signals.progress.emit(job, .70, "Kodowanie lokalne")
+                    for raw in proc.stdout:
+                        line = raw.strip()
+                        if line.startswith("out_time_us="):
+                            try:
+                                value = int(line.split("=", 1)[1])
+                                self.signals.progress.emit(job, min(.99, .70 + value / ((end_ms - start_ms) * 1000) * .29), "Kodowanie lokalne")
+                            except ValueError:
+                                pass
+                        elif line:
+                            errors.append(line)
+                            errors = errors[-10:]
+                    if proc.wait():
+                        raise RuntimeError("\n".join(errors[-6:]))
+                    if job != self.download_job:
+                        return
+                    Path(path).unlink(missing_ok=True)
+                    path = preview
+            probe = subprocess.run(
+                [FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_entries",
+                 "stream=avg_frame_rate", "-show_entries", "format=duration",
+                 "-of", "json", path], capture_output=True, text=True,
+                creationflags=CREATE_NO_WINDOW, timeout=30)
             if probe.returncode:
                 raise RuntimeError(probe.stderr.strip())
-            info = __import__("json").loads(probe.stdout)
+            info = json.loads(probe.stdout)
             duration = round(float(info["format"]["duration"]) * 1000)
             if duration <= 1:
                 raise RuntimeError("Nieprawidłowy czas trwania")
@@ -686,6 +700,8 @@ QCheckBox { spacing:5px; }
                 if int(denominator):
                     fps = float(numerator) / float(denominator)
             self.signals.downloaded.emit(job, path, duration, fps if fps > 0 else 30, section or "")
+        except InterruptedError:
+            pass
         except Exception as error:
             if job == self.download_job:
                 self.signals.failed.emit(job, str(error))
@@ -699,9 +715,12 @@ QCheckBox { spacing:5px; }
                     pass
 
     def on_progress(self, job, fraction, name):
-        if job != (self.download_job if name == "Pobieranie" else self.export_job):
+        if job != (self.export_job if name == "Eksport" else self.download_job):
             return
-        if name == "Pobieranie":
+        if name != "Eksport":
+            if name != self.download_phase:
+                self.download_phase = name
+                self.download_has_percent = False
             now = time.monotonic()
             if not self.download_has_percent or fraction + .1 < self.progress_value:
                 self.progress_first_at = now

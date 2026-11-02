@@ -19,6 +19,7 @@ import tempfile
 import threading
 from pathlib import Path
 from urllib.parse import urlparse
+from hls_clip import download as download_hls, FastUnavailable
 
 HOME = Path.home()
 DOWNLOADS = Path(os.environ.get("XDG_DOWNLOAD_DIR", str(HOME / "Pobrane"))).expanduser()
@@ -243,6 +244,7 @@ class YTCut(Gtk.Window):
         self.is_downloading = False
         self.download_has_percent = False
         self.download_started_at = 0.0
+        self.download_phase = "Pobieranie"
         self.progress_first_at = 0.0
         self.progress_last_at = 0.0
         self.progress_first_value = 0.0
@@ -553,11 +555,12 @@ class YTCut(Gtk.Window):
             now = time.monotonic()
             elapsed = now - self.progress_first_at
             delta = (self.progress_value - self.progress_first_value) / 100
-            eta = elapsed * (1 - self.progress_value / 100) / delta if delta > .02 and elapsed >= 3 and now - self.progress_last_at < 10 else None
+            goal = 70 if self.download_phase == "Pobieranie segmentów" else 99 if self.download_phase == "Kodowanie lokalne" else 100
+            eta = elapsed * (goal - self.progress_value) / 100 / delta if delta > .02 and elapsed >= 3 and now - self.progress_last_at < 10 else None
             remaining = f"~{human_time(round(eta) * 1000)}" if eta is not None else "obliczanie..."
             if self.progress_value >= 99:
                 remaining = "finalizacja..."
-            display = f"{self.progress_value:.1f}%   |   czas: {human_time(int(elapsed) * 1000)}   |   pozostało: {remaining}"
+            display = f"{self.download_phase}: {self.progress_value:.1f}%   |   czas: {human_time(int(elapsed) * 1000)}   |   ETA etapu: {remaining}"
             self.progress.set_text(display)
             self.status.set_text(display)
             self.progress_display_at = int(now)
@@ -722,6 +725,7 @@ class YTCut(Gtk.Window):
         self.is_downloading = True
         self.download_has_percent = False
         self.download_started_at = time.monotonic()
+        self.download_phase = "Pobieranie"
         self.progress_first_at = 0.0
         self.progress_display_at = -1
         self.last_download_error = ""
@@ -729,103 +733,106 @@ class YTCut(Gtk.Window):
         threading.Thread(target=self.download_worker, args=(job, url, self.workdir, section), daemon=True).start()
 
     def download_worker(self, job, url, directory, section):
-        cmd = [
-            YTDLP, "--no-playlist", "--no-mtime", "--newline", "--no-colors",
-            "--progress", "--js-runtimes", "node", "--no-warnings",
-            "-f", "bv*+ba/b", "--merge-output-format", "mkv",
-            "-o", str(Path(directory) / "source.%(ext)s"),
-            "--print", "after_move:YT_CUT_FILE:%(filepath)s",
-        ]
-        if section:
-            cmd += ["--download-sections", section,
-                    "-S", "proto:m3u8,vcodec:h264",
-                    "--downloader-args", "ffmpeg_o:-progress pipe:2 -nostats"]
-        cmd.append(url)
         filepath = None
         errors = []
-        section_us = None
+        start_ms = end_ms = None
         if section:
-            begin, finish = section[1:].split("-", 1)
-            section_us = (parse_clock(finish) - parse_clock(begin)) * 1000
+            a, b = section[1:].split("-", 1)
+            start_ms, end_ms = parse_clock(a), parse_clock(b)
         try:
             if job != self.job_id:
                 return
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    text=True, errors="replace", bufsize=1, start_new_session=True)
-            if job != self.job_id:
-                self.stop_process(proc)
-            else:
-                self.download_proc = proc
-            for line in proc.stdout:
-                line = line.strip()
-                if line.startswith("YT_CUT_FILE:"):
-                    filepath = line.split(":", 1)[1].strip()
-                if not line:
-                    continue
-                errors.append(line)
-                if len(errors) > 15:
-                    errors.pop(0)
-                if section and line.startswith("out_time_us="):
-                    try:
-                        micros = int(line.split("=", 1)[1])
-                        GLib.idle_add(self.download_progress, job, max(0.0, min(70.0, micros / section_us * 70.0)))
-                    except ValueError:
-                        pass
-                elif not section:
-                    percent = re.search(r"\[download\]\s+(\d+(?:\.\d+)?)%", line)
-                    if percent:
-                        GLib.idle_add(self.download_progress, job, float(percent.group(1)))
-            code = proc.wait()
-            if job != self.job_id:
-                return
-            if code:
-                raise RuntimeError("\n".join(errors[-5:]))
-            if not filepath or not Path(filepath).is_file():
-                candidates = [p for p in Path(directory).glob("source.*") if p.is_file() and p.suffix not in (".part", ".ytdl")]
-                if not candidates:
-                    raise RuntimeError("Nie znaleziono pobranego pliku.")
-                filepath = str(max(candidates, key=lambda p: p.stat().st_size))
             if section:
-                preview = str(Path(directory) / "preview.mkv")
-                encode = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel", "error",
-                          "-progress", "pipe:1", "-i", filepath, "-t", f"{section_us / 1_000_000:.3f}",
-                          "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264",
-                          "-preset", "ultrafast", "-crf", "19", "-pix_fmt", "yuv420p",
-                          "-c:a", "aac", "-b:a", "192k", "-f", "matroska", preview]
-                GLib.idle_add(self.download_progress, job, 70.0)
-                proc = subprocess.Popen(encode, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                try:
+                    filepath = download_hls(
+                        url, start_ms, end_ms, directory, YTDLP, "ffmpeg",
+                        lambda percent, phase: GLib.idle_add(self.download_progress, job, percent, phase),
+                        lambda: job != self.job_id,
+                        lambda proc: setattr(self, "download_proc", proc) if job == self.job_id else self.stop_process(proc),
+                    )
+                    GLib.idle_add(self.download_progress, job, 99, "Finalizacja")
+                except FastUnavailable:
+                    GLib.idle_add(self.download_fallback, job)
+            if filepath is None:
+                cmd = [YTDLP, "--no-playlist", "--no-mtime", "--newline", "--no-colors",
+                       "--progress", "--js-runtimes", "node", "--no-warnings",
+                       "-f", "bv*+ba/b", "--merge-output-format", "mkv",
+                       "-o", str(Path(directory) / "source.%(ext)s"),
+                       "--print", "after_move:YT_CUT_FILE:%(filepath)s"]
+                if section:
+                    cmd += ["--download-sections", section, "-S", "proto:m3u8,vcodec:h264",
+                            "--downloader-args", "ffmpeg_o:-progress pipe:2 -nostats"]
+                cmd.append(url)
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                         text=True, errors="replace", bufsize=1, start_new_session=True)
-                if job != self.job_id:
-                    self.stop_process(proc)
-                else:
-                    self.download_proc = proc
+                self.download_proc = proc
                 for line in proc.stdout:
                     line = line.strip()
-                    if line.startswith("out_time_us="):
+                    if line.startswith("YT_CUT_FILE:"):
+                        filepath = line.split(":", 1)[1].strip()
+                    if line:
+                        errors.append(line)
+                        errors = errors[-15:]
+                    if section and line.startswith("out_time_us="):
                         try:
-                            micros = int(line.split("=", 1)[1])
-                            GLib.idle_add(self.download_progress, job, min(99.0, 70.0 + micros / section_us * 29.0))
+                            value = int(line.split("=", 1)[1])
+                            GLib.idle_add(self.download_progress, job, min(70, value / ((end_ms - start_ms) * 1000) * 70), "Pobieranie")
                         except ValueError:
                             pass
-                    elif line and not line.startswith(("progress=", "frame=", "fps=", "stream_", "bitrate=", "total_size=", "out_time=", "out_time_ms=", "dup_frames=", "drop_frames=", "speed=", "quality=")):
-                        errors.append(line)
-                if proc.wait() != 0:
+                    elif not section:
+                        found = re.search(r"\[download\]\s+(\d+(?:\.\d+)?)%", line)
+                        if found:
+                            GLib.idle_add(self.download_progress, job, float(found.group(1)), "Pobieranie")
+                if proc.wait():
                     raise RuntimeError("\n".join(errors[-6:]))
                 if job != self.job_id:
                     return
-                Path(filepath).unlink(missing_ok=True)
-                filepath = preview
-            info = subprocess.run(
-                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                 "-of", "default=noprint_wrappers=1:nokey=1", filepath],
-                capture_output=True, text=True, timeout=20,
-            )
+                if not filepath or not Path(filepath).is_file():
+                    candidates = [path for path in Path(directory).glob("source.*")
+                                  if path.is_file() and path.suffix not in (".part", ".ytdl")]
+                    if not candidates:
+                        raise RuntimeError("Nie znaleziono pobranego pliku.")
+                    filepath = str(max(candidates, key=lambda path: path.stat().st_size))
+                if section:
+                    preview = str(Path(directory) / "preview.mkv")
+                    cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel", "error",
+                           "-progress", "pipe:1", "-i", filepath,
+                           "-t", f"{(end_ms - start_ms) / 1000:.3f}",
+                           "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264",
+                           "-preset", "ultrafast", "-crf", "19", "-pix_fmt", "yuv420p",
+                           "-c:a", "aac", "-b:a", "192k", "-f", "matroska", preview]
+                    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                            text=True, errors="replace", bufsize=1, start_new_session=True)
+                    self.download_proc = proc
+                    GLib.idle_add(self.download_progress, job, 70, "Kodowanie lokalne")
+                    for line in proc.stdout:
+                        line = line.strip()
+                        if line.startswith("out_time_us="):
+                            try:
+                                value = int(line.split("=", 1)[1])
+                                GLib.idle_add(self.download_progress, job, min(99, 70 + value / ((end_ms - start_ms) * 1000) * 29), "Kodowanie lokalne")
+                            except ValueError:
+                                pass
+                        elif line:
+                            errors.append(line)
+                            errors = errors[-10:]
+                    if proc.wait():
+                        raise RuntimeError("\n".join(errors[-6:]))
+                    if job != self.job_id:
+                        return
+                    Path(filepath).unlink(missing_ok=True)
+                    filepath = preview
+            info = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                                   "-of", "default=noprint_wrappers=1:nokey=1", filepath],
+                                  capture_output=True, text=True, timeout=20)
             if info.returncode:
                 raise RuntimeError(info.stderr.strip())
             duration = round(float(info.stdout.strip()) * 1000)
             if duration <= 1:
                 raise RuntimeError("Nie można odczytać długości filmu.")
             GLib.idle_add(self.download_done, job, filepath, duration, section)
+        except InterruptedError:
+            pass
         except Exception as exc:
             if job == self.job_id:
                 GLib.idle_add(self.download_failed, job, str(exc))
@@ -835,9 +842,17 @@ class YTCut(Gtk.Window):
             elif self.download_proc and self.download_proc.poll() is not None:
                 self.download_proc = None
 
-    def download_progress(self, job, percent):
+    def download_fallback(self, job):
+        if job == self.job_id:
+            self.status.set_text("Szybkie HLS niedostępne, używam pobierania FFmpeg.")
+        return False
+
+    def download_progress(self, job, percent, phase="Pobieranie"):
         if job != self.job_id:
             return False
+        if phase != self.download_phase:
+            self.download_phase = phase
+            self.download_has_percent = False
         now = time.monotonic()
         if not self.download_has_percent or percent + 10 < self.progress_value:
             self.progress_first_at = now
@@ -846,7 +861,7 @@ class YTCut(Gtk.Window):
         self.progress_last_at = now
         self.progress_value = percent
         self.progress_display_at = -1
-        self.progress.set_fraction(min(1, percent / 100))
+        self.progress.set_fraction(min(1, max(0, percent / 100)))
         return False
 
     def download_done(self, job, path, duration, section):

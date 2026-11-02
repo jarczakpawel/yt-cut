@@ -65,9 +65,9 @@ The Linux version embeds mpv in a GTK window, so it needs a running X11/XWayland
 - Drag the red handles: adjust START / END
 - Play / Pause: preview from the selected point and return to it on pause
 
-For partial downloads, YT Cut prefers the available YouTube HLS stream and first downloads only the requested section without re-encoding. The fragment is then processed locally with FFmpeg to produce the precise requested duration. If HLS is unavailable, yt-dlp can fall back to HTTPS; performance depends on the source. This reduces the effect of YouTube's throttling of unbounded FFmpeg HTTP requests.
+For partial downloads, YT Cut reads YouTube's VOD HLS playlists, selects only the segments overlapping the requested interval, and downloads up to 10 segments concurrently. The small video and audio segment files are assembled locally. FFmpeg then re-encodes the selected portion for frame-accurate cuts. The original full-length source video is **not downloaded**. If YouTube provides no compatible unencrypted HLS streams, YT Cut falls back to yt-dlp's FFmpeg time-range downloader.
 
-The progress indicator reports the download stage (0-70%) and local processing (70-99%). An approximate time remaining is displayed after sufficient progress has been observed. It starts counting when percentages become available, not during initial extraction. ETA may be unavailable if progress stalls. The final 100% is shown only after the media file is finalized.
+Download progress covers 0-70% (segments) and 70-99% (local encoding). Once enough progress has been observed, YT Cut displays an approximate **ETA for the current stage**, not a false fixed overall ETA. The display shows hours, minutes and seconds. Progress reaches 100% only after the output file is verified.
 
 YouTube network throttling and video encoding performance vary by video, server and computer; the ETA is an estimate, not a guarantee.
 

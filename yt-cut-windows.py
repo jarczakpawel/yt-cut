@@ -1035,11 +1035,9 @@ def media_check():
             if selection.crop != (31, 21, 160, 90):
                 raise RuntimeError("Crop panel selected wrong coordinates")
             selection.canvas.resize(600, 300)
-            from PySide6.QtGui import QImage, QPainter
+            from PySide6.QtGui import QImage
             drawing = QImage(600, 300, QImage.Format_ARGB32)
-            painter = QPainter(drawing)
-            selection.canvas.render(painter)
-            painter.end()
+            selection.canvas.render(drawing)
             selection.deleteLater()
             player = QMediaPlayer()
             sink = QVideoSink()

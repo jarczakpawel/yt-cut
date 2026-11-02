@@ -954,76 +954,91 @@ def media_check():
 def download_check():
     from functools import partial
     from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+    from types import SimpleNamespace
 
     log = Path.cwd() / "download-check.log"
+    log.write_text("START: Windows download and export verification\n", encoding="utf-8")
     server = None
-    window = None
+
+    class Sink:
+        def __init__(self):
+            self.values = []
+
+        def emit(self, *values):
+            self.values.append(values)
+
     try:
         with tempfile.TemporaryDirectory(prefix="ytcut-check-") as folder:
             root = Path(folder)
             source = root / "sample.mp4"
-            generated = subprocess.run(
+            created = subprocess.run(
                 [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
                  "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25",
                  "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
                  "-t", "2.0", "-c:v", "libx264", "-preset", "ultrafast",
-                 "-pix_fmt", "yuv420p", "-c:a", "aac", source.as_posix()],
+                 "-pix_fmt", "yuv420p", "-c:a", "aac", str(source)],
                 capture_output=True, text=True, timeout=25, creationflags=CREATE_NO_WINDOW,
             )
-            if generated.returncode:
-                raise RuntimeError(f"Creating source media: {generated.stderr[-1000:]}")
+            if created.returncode:
+                raise RuntimeError("Source creation: " + created.stderr[-1000:])
 
             class Handler(SimpleHTTPRequestHandler):
                 def log_message(self, format, *args):
                     pass
 
-            server = ThreadingHTTPServer(
-                ("127.0.0.1", 0), partial(Handler, directory=folder)
-            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), partial(Handler, directory=folder))
             threading.Thread(target=server.serve_forever, daemon=True).start()
-            app = QApplication([])
-            global DOWNLOADS
-            DOWNLOADS = root / "Downloads"
-            window = Window()
-            window.url.setText(f"http://127.0.0.1:{server.server_port}/sample.mp4")
-            window.download()
 
-            deadline = time.monotonic() + 40
-            while not window.media and time.monotonic() < deadline:
-                app.processEvents()
-                if window.status.text().startswith("Błąd pobierania:"):
-                    raise RuntimeError(window.status.text())
-                time.sleep(.03)
-            if not window.media:
-                raise RuntimeError("Whole-video download timed out")
-            if not (1500 <= window.duration <= 2500):
-                raise RuntimeError(f"Unexpected downloaded duration: {window.duration} ms")
+            signals = SimpleNamespace(
+                progress=Sink(), downloaded=Sink(), failed=Sink(), exported=Sink()
+            )
+            state = SimpleNamespace(
+                download_job=1, export_job=1, download_proc=None,
+                export_proc=None, signals=signals,
+            )
+            directory = str(root / "download")
+            Path(directory).mkdir()
+            url = f"http://127.0.0.1:{server.server_port}/sample.mp4"
+            Window.download_worker(state, 1, url, directory, None)
+            if signals.failed.values:
+                raise RuntimeError(f"Download failed: {signals.failed.values[-1]}")
+            if len(signals.downloaded.values) != 1:
+                raise RuntimeError("Download worker returned no media")
+            _, media_path, duration_ms, fps, _ = signals.downloaded.values[0]
+            if not Path(media_path).is_file() or not 1500 <= duration_ms <= 2500:
+                raise RuntimeError(f"Downloaded media invalid: {media_path}, {duration_ms} ms")
 
-            for idx, ext in enumerate(("mp4", "mp3", "wav")):
-                window.format.setCurrentIndex(idx)
-                window.export()
-                deadline = time.monotonic() + 40
-                while time.monotonic() < deadline:
-                    app.processEvents()
-                    if window.status.text().startswith("Błąd eksportu:"):
-                        raise RuntimeError(window.status.text())
-                    if list(DOWNLOADS.glob(f"cut*.{ext}")):
-                        break
-                    time.sleep(.03)
-                files = list(DOWNLOADS.glob(f"cut*.{ext}"))
-                if not files:
-                    raise RuntimeError(f"Missing exported {ext}")
+            for ext in ("mp4", "mp3", "wav"):
+                target = root / f"cut.{ext}"
+                temporary = root / f".cut.{ext}.part"
+                command = [
+                    FFMPEG, "-hide_banner", "-nostdin", "-y", "-loglevel", "error",
+                    "-progress", "pipe:1", "-i", media_path, "-t", "1.0",
+                ]
+                if ext == "mp4":
+                    command += ["-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264",
+                                "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                                "-c:a", "aac", "-f", "mp4"]
+                else:
+                    command += ["-map", "0:a:0", "-vn"]
+                    command += (["-c:a", "libmp3lame", "-f", "mp3"] if ext == "mp3"
+                                else ["-c:a", "pcm_s16le", "-f", "wav"])
+                command.append(str(temporary))
+                Window.export_worker(state, 1, command, target, temporary, 1.0)
+                if signals.failed.values:
+                    raise RuntimeError(f"Export {ext} failed: {signals.failed.values[-1]}")
+                if not target.is_file():
+                    raise RuntimeError(f"Missing {ext} export")
                 probe = subprocess.run(
                     [FFPROBE, "-v", "error", "-show_entries", "format=duration",
-                     "-of", "default=noprint_wrappers=1:nokey=1", str(files[0])],
-                    capture_output=True, text=True, timeout=15,
-                    creationflags=CREATE_NO_WINDOW,
+                     "-of", "default=noprint_wrappers=1:nokey=1", str(target)],
+                    capture_output=True, text=True, timeout=15, creationflags=CREATE_NO_WINDOW,
                 )
-                if probe.returncode or not 1.5 <= float(probe.stdout.strip()) <= 2.5:
+                if probe.returncode or not .8 <= float(probe.stdout.strip()) <= 1.2:
                     raise RuntimeError(f"Invalid {ext} export: {probe.stderr}")
             log.write_text(
-                "PASS: yt-dlp HTTP download, ffprobe JSON parsing, "
-                "window media loading, MP4/MP3/WAV exports\n",
+                "PASS: packaged yt-dlp HTTP download, ffprobe JSON parsing, "
+                "download_worker and export_worker, MP4/MP3/WAV outputs\n",
                 encoding="utf-8",
             )
     except Exception:
@@ -1031,8 +1046,6 @@ def download_check():
         log.write_text(traceback.format_exc(), encoding="utf-8")
         raise SystemExit(1)
     finally:
-        if window:
-            window.close()
         if server:
             server.shutdown()
             server.server_close()

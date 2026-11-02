@@ -3,6 +3,7 @@ name: Windows portable
 on:
   push:
     branches: [main]
+    tags: ["v*"]
     paths:
       - "yt-cut-windows.py"
       - "tools/**"
@@ -11,7 +12,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   windows:
@@ -67,3 +68,12 @@ jobs:
           path: YT-Cut-Windows-x64.zip
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: YT Cut \${{ github.ref_name }}
+          generate_release_notes: true
+          files: YT-Cut-Windows-x64.zip
+          fail_on_unmatched_files: true

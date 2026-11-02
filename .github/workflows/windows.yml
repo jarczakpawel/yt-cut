@@ -57,6 +57,10 @@ jobs:
           Get-Content "$root\\media-check.log"
           if ($media.ExitCode -ne 0) { throw "Windows media decoding and export check returned $($media.ExitCode)" }
           Remove-Item "$root\media-check.log"
+          $download = Start-Process -FilePath (Resolve-Path "$root\YT-Cut.exe").Path -ArgumentList "--download-check" -Wait -PassThru -WorkingDirectory (Resolve-Path $root).Path
+          Get-Content "$root\download-check.log"
+          if ($download.ExitCode -ne 0) { throw "Windows download and MP4/MP3/WAV export check returned $($download.ExitCode)" }
+          Remove-Item "$root\download-check.log"
       - name: Create portable ZIP
         shell: pwsh
         run: Compress-Archive -Path dist\YT-Cut -DestinationPath YT-Cut-Windows-x64.zip -CompressionLevel Optimal

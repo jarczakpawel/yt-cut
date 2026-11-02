@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import sys
 import math
 import shutil
@@ -950,11 +951,100 @@ def media_check():
         raise SystemExit(1)
 
 
+def download_check():
+    from functools import partial
+    from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+
+    log = Path.cwd() / "download-check.log"
+    server = None
+    window = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="ytcut-check-") as folder:
+            root = Path(folder)
+            source = root / "sample.mp4"
+            generated = subprocess.run(
+                [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+                 "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25",
+                 "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+                 "-t", "2.0", "-c:v", "libx264", "-preset", "ultrafast",
+                 "-pix_fmt", "yuv420p", "-c:a", "aac", source.as_posix()],
+                capture_output=True, text=True, timeout=25, creationflags=CREATE_NO_WINDOW,
+            )
+            if generated.returncode:
+                raise RuntimeError(f"Creating source media: {generated.stderr[-1000:]}")
+
+            class Handler(SimpleHTTPRequestHandler):
+                def log_message(self, format, *args):
+                    pass
+
+            server = ThreadingHTTPServer(
+                ("127.0.0.1", 0), partial(Handler, directory=folder)
+            )
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            app = QApplication([])
+            global DOWNLOADS
+            DOWNLOADS = root / "Downloads"
+            window = Window()
+            window.url.setText(f"http://127.0.0.1:{server.server_port}/sample.mp4")
+            window.download()
+
+            deadline = time.monotonic() + 40
+            while not window.media and time.monotonic() < deadline:
+                app.processEvents()
+                if window.status.text().startswith("Błąd pobierania:"):
+                    raise RuntimeError(window.status.text())
+                time.sleep(.03)
+            if not window.media:
+                raise RuntimeError("Whole-video download timed out")
+            if not (1500 <= window.duration <= 2500):
+                raise RuntimeError(f"Unexpected downloaded duration: {window.duration} ms")
+
+            for idx, ext in enumerate(("mp4", "mp3", "wav")):
+                window.format.setCurrentIndex(idx)
+                window.export()
+                deadline = time.monotonic() + 40
+                while time.monotonic() < deadline:
+                    app.processEvents()
+                    if window.status.text().startswith("Błąd eksportu:"):
+                        raise RuntimeError(window.status.text())
+                    if list(DOWNLOADS.glob(f"cut*.{ext}")):
+                        break
+                    time.sleep(.03)
+                files = list(DOWNLOADS.glob(f"cut*.{ext}"))
+                if not files:
+                    raise RuntimeError(f"Missing exported {ext}")
+                probe = subprocess.run(
+                    [FFPROBE, "-v", "error", "-show_entries", "format=duration",
+                     "-of", "default=noprint_wrappers=1:nokey=1", str(files[0])],
+                    capture_output=True, text=True, timeout=15,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                if probe.returncode or not 1.5 <= float(probe.stdout.strip()) <= 2.5:
+                    raise RuntimeError(f"Invalid {ext} export: {probe.stderr}")
+            log.write_text(
+                "PASS: yt-dlp HTTP download, ffprobe JSON parsing, "
+                "window media loading, MP4/MP3/WAV exports\n",
+                encoding="utf-8",
+            )
+    except Exception:
+        import traceback
+        log.write_text(traceback.format_exc(), encoding="utf-8")
+        raise SystemExit(1)
+    finally:
+        if window:
+            window.close()
+        if server:
+            server.shutdown()
+            server.server_close()
+
+
 if __name__ == "__main__":
     if "--self-check" in sys.argv:
         self_check()
     elif "--media-check" in sys.argv:
         media_check()
+    elif "--download-check" in sys.argv:
+        download_check()
     else:
         if sys.platform == "win32":
             import ctypes

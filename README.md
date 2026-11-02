@@ -20,15 +20,15 @@ Windows may display a Microsoft SmartScreen warning because the executable is no
 
 Install Python 3, GTK 3 with Python GObject Introspection bindings, mpv, FFmpeg, yt-dlp, and Node.js 22 or later. For example:
 
-\`\`\`bash
+```bash
 sudo apt install python3-gi gir1.2-gtk-3.0 mpv ffmpeg nodejs
-\`\`\`
+```
 
 Install an up-to-date yt-dlp from its [official installation instructions](https://github.com/yt-dlp/yt-dlp/wiki/Installation). Then run:
 
-\`\`\`bash
+```bash
 python3 yt-cut.py
-\`\`\`
+```
 
 The Linux version embeds mpv in a GTK window, so it needs a running X11/XWayland display.
 
@@ -42,7 +42,7 @@ The Linux version embeds mpv in a GTK window, so it needs a running X11/XWayland
 - Preview only the selected interval, with optional looping
 - Export to **MP4 by default**, or select MP3 or WAV
 - Optionally fade audio in and/or out, with adjustable fade duration
-- Automatically name output files \`cut1.mp4\`, \`cut2.mp3\`, and so on
+- Automatically name output files `cut1.mp4`, `cut2.mp3`, and so on
 - Save exported files in **Downloads**
 - When downloading a new video, unload the previous video and discard temporary files
 
@@ -61,7 +61,7 @@ The Linux version embeds mpv in a GTK window, so it needs a running X11/XWayland
 - Drag the red handles: adjust START / END
 - Play / Pause: preview from the selected point and return to it on pause
 
-Timestamp fields support \`HH:MM:SS.mmm\`. Export is performed with FFmpeg using accurate seeking and re-encoding. Actual video-frame precision depends on the source media and decoder; a millisecond timestamp does not guarantee an independently decodable frame at that exact instant.
+Timestamp fields support `HH:MM:SS.mmm`. Export is performed with FFmpeg using accurate seeking and re-encoding. Actual video-frame precision depends on the source media and decoder; a millisecond timestamp does not guarantee an independently decodable frame at that exact instant.
 
 ## Platforms and dependencies
 
@@ -73,7 +73,7 @@ Timestamp fields support \`HH:MM:SS.mmm\`. Export is performed with FFmpeg using
 | Export | FFmpeg | FFmpeg |
 | JavaScript runtime | Bundled Node.js | Node.js |
 
-Windows releases are assembled from the source code in this repository using GitHub Actions. Release archives are published with a version tag. The executable is unsigned.
+Release archives are built automatically from the source code in this repository when a new version is published. The executable is unsigned.
 
 YouTube downloading requires an internet connection and depends on yt-dlp compatibility with YouTube. Download only content you are authorized to use.
 

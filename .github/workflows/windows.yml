@@ -73,7 +73,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          name: YT Cut \${{ github.ref_name }}
+          name: YT Cut ${{ github.ref_name }}
           generate_release_notes: true
           files: YT-Cut-Windows-x64.zip
           fail_on_unmatched_files: true

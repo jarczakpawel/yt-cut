@@ -56,13 +56,13 @@ def main():
         prefix = root / "prefix"
         hdr_build = root / "headers-build"
         run("cmake", "-S", str(paths["Vulkan-Headers"]), "-B", str(hdr_build),
-            "-G", "Visual Studio 17 2022", "-A", "x64",
+            "-G", "Visual Studio 18 2026", "-A", "x64",
             f"-DCMAKE_INSTALL_PREFIX={prefix}")
         run("cmake", "--install", str(hdr_build), "--config", "Release")
 
         loader_build = root / "loader-build"
         run("cmake", "-S", str(paths["Vulkan-Loader"]), "-B", str(loader_build),
-            "-G", "Visual Studio 17 2022", "-A", "x64",
+            "-G", "Visual Studio 18 2026", "-A", "x64",
             f"-DVULKAN_HEADERS_INSTALL_DIR={prefix}",
             "-DBUILD_TESTS=OFF", "-DUPDATE_DEPS=OFF")
         run("cmake", "--build", str(loader_build), "--config", "Release", "--parallel", "4")

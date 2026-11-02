@@ -21,7 +21,7 @@ jobs:
         with:
           node-version: "24"
       - name: Install build dependencies
-        run: python -m pip install --disable-pip-version-check PySide6==6.10.0 pyinstaller==6.16.0 Pillow==11.3.0
+        run: python -m pip install --disable-pip-version-check PySide6==6.10.0 pyinstaller==6.16.0 Pillow==11.3.0 "cmake>=4.2,<4.3"
       - name: Download and bundle media tools
         shell: pwsh
         run: |
@@ -43,6 +43,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Extracting libmpv failed' }
           Copy-Item "$env:RUNNER_TEMP\mpv-dev\libmpv-2.dll" tools-bin\libmpv-2.dll
           python tools/build_vulkan_loader.py tools-bin/vulkan-1.dll tools-bin/libmpv-2.dll
+          if ($LASTEXITCODE -ne 0) { throw "Vulkan Loader build failed" }
           & tools-bin\ffmpeg.exe -version | Select-Object -First 1
           & tools-bin\ffprobe.exe -version | Select-Object -First 1
           & tools-bin\yt-dlp.exe --version

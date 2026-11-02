@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import faulthandler
 import sys
 import math
 import shutil
@@ -14,10 +15,14 @@ from hls_clip import download as download_hls, FastUnavailable
 from crop_geometry import ffmpeg_crop
 from crop_editor_qt import CropPanel
 
+if sys.platform == "win32":
+    os.environ.setdefault("QT_MEDIA_BACKEND", "ffmpeg")
+    os.environ.setdefault("QT_FFMPEG_DECODING_HW_DEVICE_TYPES", ",")
+    os.environ.setdefault("QT_DISABLE_HW_TEXTURES_CONVERSION", "1")
+
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal, QObject, QRectF, QPointF
-from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
+from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPolygonF
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink
-from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication, QWidget, QMainWindow, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QComboBox, QCheckBox, QDoubleSpinBox, QProgressBar,
@@ -57,7 +62,7 @@ def parse_clock(text):
 
 class Events(QObject):
     progress = Signal(int, float, str)
-    downloaded = Signal(int, str, int, float, str)
+    downloaded = Signal(int, str, int, float, str, str)
     failed = Signal(int, str)
     exported = Signal(int, str)
 
@@ -166,6 +171,83 @@ class Timeline(QWidget):
         self.update()
 
 
+def prepare_preview(path, info, directory, ffmpeg, progress, cancelled, set_process):
+    streams = info.get("streams", [])
+    video = next((stream for stream in streams if stream.get("codec_type") == "video"), {})
+    audio = next((stream for stream in streams if stream.get("codec_type") == "audio"), {})
+    if (video.get("codec_name") == "h264" and
+            (not audio or audio.get("codec_name") == "aac") and Path(path).suffix.lower() == ".mp4"):
+        return path
+    target = str(Path(directory) / "preview-player.mp4")
+    copy_video = video.get("codec_name") == "h264"
+    cmd = [ffmpeg, "-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1",
+           "-i", path, "-map", "0:v:0", "-map", "0:a:0?"]
+    if copy_video:
+        cmd += ["-c:v", "copy"]
+    else:
+        cmd += ["-vf", "scale=960:960:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-pix_fmt", "yuv420p"]
+    if audio and audio.get("codec_name") == "aac":
+        cmd += ["-c:a", "copy"]
+    else:
+        cmd += ["-c:a", "aac", "-b:a", "128k"]
+    cmd += ["-movflags", "+faststart", "-f", "mp4", target]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, errors="replace", creationflags=CREATE_NO_WINDOW)
+    set_process(proc)
+    errors = []
+    duration = float(info["format"]["duration"])
+    for line in proc.stdout:
+        line = line.strip()
+        if cancelled():
+            proc.terminate()
+            break
+        if line.startswith("out_time_us="):
+            try:
+                progress(min(.99, max(0, int(line.split("=", 1)[1]) / (duration * 1_000_000))))
+            except ValueError:
+                pass
+        elif line and not line.startswith(("progress=", "frame=", "fps=", "stream_", "bitrate=",
+                                            "total_size=", "out_time=", "out_time_ms=", "dup_frames=",
+                                            "drop_frames=", "speed=", "quality=")):
+            errors.append(line)
+            errors = errors[-8:]
+    if cancelled():
+        raise InterruptedError("Anulowano przygotowanie podglądu")
+    if proc.wait():
+        raise RuntimeError("Przygotowanie podglądu: " + "\n".join(errors))
+    if not Path(target).is_file():
+        raise RuntimeError("Nie utworzono pliku podglądu")
+    return target
+
+
+class VideoSurface(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.sink = QVideoSink(self)
+        self.sink.videoFrameChanged.connect(self.new_frame)
+        self.frame = QImage()
+        self.setMinimumHeight(280)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    def new_frame(self, frame):
+        image = frame.toImage()
+        if not image.isNull():
+            self.frame = image
+            self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#101216"))
+        if not self.frame.isNull():
+            size = self.frame.size()
+            width = min(self.width() / size.width(), self.height() / size.height())
+            w, h = size.width() * width, size.height() * width
+            painter.setRenderHint(QPainter.SmoothPixmapTransform)
+            painter.drawImage(QRectF((self.width() - w) / 2, (self.height() - h) / 2, w, h), self.frame)
+        painter.end()
+
+
 class Window(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -179,6 +261,7 @@ class Window(QMainWindow):
         self.position = 0
         self.fps = 30
         self.media = None
+        self.preview_media = None
         self.crop_rect = None
         self.directory = None
         self.old_dirs = []
@@ -267,10 +350,8 @@ class Window(QMainWindow):
         self.title_text.setObjectName("subtle")
         main.addWidget(self.title_text)
 
-        self.video = QVideoWidget()
-        self.video.setMinimumHeight(280)
-        self.video.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.player.setVideoOutput(self.video)
+        self.video = VideoSurface()
+        self.player.setVideoSink(self.video.sink)
         self.video_stack = QStackedWidget()
         self.video_stack.addWidget(self.video)
         self.crop_panel = None
@@ -387,7 +468,7 @@ QPushButton:hover { background:#3a414e; }
 QPushButton:disabled { color:#66707e; }
 QPushButton#primary { background:#ed5350; border:1px solid #f5766d; color:white; font-weight:600; }
 QPushButton#primary:hover { background:#fa6a61; }
-QVideoWidget { background:#101216; }
+VideoSurface { background:#101216; }
 QProgressBar { background:#303640; border:0; border-radius:5px; min-height:18px; text-align:center; font-weight:600; }
 QProgressBar::chunk { background:#eb5650; border-radius:3px; }
 QCheckBox { spacing:5px; }
@@ -552,6 +633,7 @@ QCheckBox { spacing:5px; }
         self.player.stop()
         self.player.setSource(QUrl())
         self.media = None
+        self.preview_media = None
         self.position = self.anchor = self.start = self.end = self.duration = 0
         self.title_text.setText("Brak wczytanego filmu")
         self.position_text.setText(f"{clock(0)} / {clock(0)}")
@@ -708,7 +790,7 @@ QCheckBox { spacing:5px; }
                     path = preview
             probe = subprocess.run(
                 [FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_entries",
-                 "stream=avg_frame_rate", "-show_entries", "format=duration",
+                 "stream=avg_frame_rate,codec_type,codec_name", "-show_entries", "format=duration",
                  "-of", "json", path], capture_output=True, text=True,
                 creationflags=CREATE_NO_WINDOW, timeout=30)
             if probe.returncode:
@@ -719,11 +801,18 @@ QCheckBox { spacing:5px; }
                 raise RuntimeError("Nieprawidłowy czas trwania")
             fps = 30.0
             streams = info.get("streams", [])
-            if streams:
-                numerator, denominator = streams[0].get("avg_frame_rate", "30/1").split("/")
+            video_stream = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
+            if video_stream:
+                numerator, denominator = video_stream.get("avg_frame_rate", "30/1").split("/")
                 if int(denominator):
                     fps = float(numerator) / float(denominator)
-            self.signals.downloaded.emit(job, path, duration, fps if fps > 0 else 30, section or "")
+            preview = prepare_preview(path, info, directory, FFMPEG,
+                                      lambda fraction: self.signals.progress.emit(job, fraction, "Podgląd"),
+                                      lambda: job != self.download_job,
+                                      lambda process: setattr(self, "download_proc", process))
+            if job != self.download_job:
+                return
+            self.signals.downloaded.emit(job, path, duration, fps if fps > 0 else 30, section or "", preview)
         except InterruptedError:
             pass
         except Exception as error:
@@ -758,15 +847,22 @@ QCheckBox { spacing:5px; }
         self.progress.setFormat(f"{name}: {fraction * 100:.1f}%")
         self.status.setText(f"{name}: {fraction * 100:.1f}%")
 
-    def on_downloaded(self, job, path, duration, fps, section):
+    def on_downloaded(self, job, path, duration, fps, section, preview):
         if job != self.download_job:
             return
         self.is_downloading = False
         self.crop_rect = None
         self.update_crop_status()
-        self.media, self.duration, self.end, self.fps = path, duration, duration, fps
+        self.media, self.preview_media, self.duration, self.end, self.fps = path, preview, duration, duration, fps
         self.position = self.anchor = self.start = 0
-        self.player.setSource(QUrl.fromLocalFile(path))
+        log_path = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "YT-Cut" / "player-stall.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as trace:
+            faulthandler.dump_traceback_later(15, file=trace)
+            try:
+                self.player.setSource(QUrl.fromLocalFile(preview))
+            finally:
+                faulthandler.cancel_dump_traceback_later()
         self.player.pause()
         self.update_fields()
         self.update_enabled()
@@ -1039,12 +1135,41 @@ def media_check():
             drawing = QImage(600, 300, QImage.Format_ARGB32)
             selection.canvas.render(drawing)
             selection.deleteLater()
+            vp9 = str(Path(directory) / "vertical-vp9.mkv")
+            encode_vp9 = subprocess.run(
+                [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+                 "-f", "lavfi", "-i", "testsrc2=size=360x640:rate=25",
+                 "-f", "lavfi", "-i", "sine=frequency=440",
+                 "-t", "1.5", "-c:v", "libvpx-vp9", "-deadline", "realtime",
+                 "-cpu-used", "8", "-b:v", "0", "-crf", "38",
+                 "-c:a", "libopus", vp9],
+                capture_output=True, text=True, timeout=50, creationflags=CREATE_NO_WINDOW)
+            if encode_vp9.returncode:
+                raise RuntimeError(f"Creating VP9/Opus test media: {encode_vp9.stderr[-1000:]}")
+            probe_vp9 = subprocess.run(
+                [FFPROBE, "-v", "error", "-show_entries",
+                 "format=duration:stream=codec_name,codec_type", "-of", "json", vp9],
+                capture_output=True, text=True, timeout=15, creationflags=CREATE_NO_WINDOW)
+            if probe_vp9.returncode:
+                raise RuntimeError(f"VP9 probe failed: {probe_vp9.stderr}")
+            preview_path = prepare_preview(
+                vp9, json.loads(probe_vp9.stdout), directory, FFMPEG,
+                lambda progress: None, lambda: False, lambda proc: None)
+            preview_probe = subprocess.run(
+                [FFPROBE, "-v", "error", "-show_entries",
+                 "stream=codec_name,codec_type", "-of", "json", preview_path],
+                capture_output=True, text=True, timeout=15, creationflags=CREATE_NO_WINDOW)
+            codecs = {row["codec_name"] for row in json.loads(preview_probe.stdout)["streams"]}
+            if preview_probe.returncode or codecs != {"h264", "aac"}:
+                raise RuntimeError(f"VP9/Opus conversion invalid: {codecs}")
             player = QMediaPlayer()
-            sink = QVideoSink()
-            player.setVideoSink(sink)
+            surface = VideoSurface()
+            surface.resize(600, 350)
+            player.setVideoSink(surface.sink)
             frames = [0]
-            sink.videoFrameChanged.connect(lambda frame: frames.__setitem__(0, frames[0] + int(frame.isValid())))
-            player.setSource(QUrl.fromLocalFile(sample))
+            surface.sink.videoFrameChanged.connect(
+                lambda frame: frames.__setitem__(0, frames[0] + int(frame.isValid())))
+            player.setSource(QUrl.fromLocalFile(preview_path))
             player.play()
             deadline = time.monotonic() + 12
             while frames[0] == 0 and time.monotonic() < deadline:
@@ -1052,11 +1177,17 @@ def media_check():
                 time.sleep(.025)
             if not frames[0]:
                 raise RuntimeError(f"No decoded video frames, error: {player.errorString()}, status: {player.mediaStatus()}")
+            if surface.frame.isNull():
+                raise RuntimeError("VideoSurface did not receive decoded image")
+            target_image = QImage(600, 350, QImage.Format_ARGB32)
+            surface.render(target_image)
             player.stop()
             player.setSource(QUrl())
-            del player, sink
+            del player, surface
             app.quit()
-            log.write_text(f"PASS: {frames[0]} decoded frame(s), FFmpeg and crop panel verified\n")
+            log.write_text(
+                f"PASS: VP9/Opus to H.264/AAC conversion, {frames[0]} frames, "
+                "VideoSurface rendering, crop panel and FFmpeg export verified\n")
     except Exception as exc:
         log.write_text(f"FAIL: {exc}\n")
         raise SystemExit(1)
@@ -1115,7 +1246,9 @@ def download_check():
                 raise RuntimeError(f"Download failed: {signals.failed.values[-1]}")
             if len(signals.downloaded.values) != 1:
                 raise RuntimeError("Download worker returned no media")
-            _, media_path, duration_ms, fps, _ = signals.downloaded.values[0]
+            _, media_path, duration_ms, fps, _, preview_path = signals.downloaded.values[0]
+            if not Path(preview_path).is_file():
+                raise RuntimeError("Missing prepared preview")
             if not Path(media_path).is_file() or not 1500 <= duration_ms <= 2500:
                 raise RuntimeError(f"Downloaded media invalid: {media_path}, {duration_ms} ms")
 

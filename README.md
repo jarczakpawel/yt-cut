@@ -82,7 +82,7 @@ Timestamp fields support `HH:MM:SS.mmm`. Export is performed with FFmpeg using a
 | | Windows | Linux |
 | --- | --- | --- |
 | UI | PySide6 (Qt) | GTK 3 |
-| Video preview | Qt Multimedia | mpv |
+| Video preview | Qt Multimedia (software decoding, H.264/AAC proxy for VP9/Opus sources) | mpv |
 | Download | yt-dlp | yt-dlp |
 | Export | FFmpeg | FFmpeg |
 | JavaScript runtime | Bundled Node.js | Node.js |
@@ -99,3 +99,5 @@ Windows distributions include third-party binaries, subject to their respective 
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp)
 - [Node.js](https://github.com/nodejs/node)
 - [Qt / PySide6](https://doc.qt.io/qtforpython-6/)
+
+On Windows, playback uses a CPU-rendered video surface instead of the native Qt video widget. Videos in VP9/Opus or other non-MP4 formats are converted to a smaller H.264/AAC preview in the background before playback. The original source remains unchanged and is used for final export and cropping.

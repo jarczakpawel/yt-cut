@@ -14,10 +14,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15
+          - runner: macos-15-intel
             arch: Intel
-          - runner: macos-15-arm64
+            machine: x86_64
+          - runner: macos-15
             arch: AppleSilicon
+            machine: arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 35
     steps:
@@ -25,7 +27,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Verify runner architecture
+        run: |
+          test "$(uname -m)" = "${{ matrix.machine }}"
       - name: Install app dependencies
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
         run: |
           python -m pip install --disable-pip-version-check PySide6==6.10.0 pyinstaller==6.16.0 Pillow==11.3.0
           brew install ffmpeg yt-dlp node

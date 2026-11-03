@@ -1131,7 +1131,7 @@ def local_media_check():
         target = Path(folder) / "cut.mp4"
         exported = subprocess.run(
             [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
-             "-i", path, "-t", ".6", "-c:v", "libx264",
+             "-i", path, "-t", "0.600", "-c:v", "libx264",
              "-pix_fmt", "yuv420p", str(target)],
             capture_output=True, text=True, timeout=25,
             creationflags=CREATE_NO_WINDOW,

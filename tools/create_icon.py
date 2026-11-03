@@ -12,3 +12,5 @@ draw.ellipse((49, 182, 88, 221), outline="white", width=10)
 draw.ellipse((192, 183, 232, 223), outline="white", width=10)
 Path("assets").mkdir(exist_ok=True)
 image.save("assets/yt-cut.ico", sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+
+image.save("assets/yt-cut.png")

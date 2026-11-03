@@ -7,3 +7,4 @@ tools-bin/
 *.zip
 .venv/
 assets/*.ico
+assets/*.png

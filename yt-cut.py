@@ -21,6 +21,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from hls_clip import download as download_hls, FastUnavailable
 from crop_geometry import ffmpeg_crop
+from media_probe import probe_video
 
 HOME = Path.home()
 DOWNLOADS = Path(os.environ.get("XDG_DOWNLOAD_DIR", str(HOME / "Pobrane"))).expanduser()
@@ -273,6 +274,8 @@ class YTCut(Gtk.Window):
         urlrow.pack_start(self.url, True, True, 0)
         self.download_btn = self.button("Pobierz", self.start_download, "primary")
         urlrow.pack_start(self.download_btn, False, False, 0)
+        self.open_file_btn = self.button("Otwórz plik", self.open_local_file)
+        urlrow.pack_start(self.open_file_btn, False, False, 0)
         self.cancel_btn = self.button("Anuluj", self.cancel_download)
         self.cancel_btn.set_sensitive(False)
         urlrow.pack_start(self.cancel_btn, False, False, 0)
@@ -705,6 +708,53 @@ class YTCut(Gtk.Window):
             except OSError:
                 pass
 
+    def open_local_file(self, *_):
+        chooser = Gtk.FileChooserDialog(
+            title="Otwórz plik wideo", transient_for=self,
+            action=Gtk.FileChooserAction.OPEN,
+        )
+        chooser.add_buttons("Anuluj", Gtk.ResponseType.CANCEL,
+                            "Otwórz", Gtk.ResponseType.OK)
+        video_filter = Gtk.FileFilter()
+        video_filter.set_name("Pliki wideo")
+        video_filter.add_mime_type("video/*")
+        chooser.add_filter(video_filter)
+        all_filter = Gtk.FileFilter()
+        all_filter.set_name("Wszystkie pliki (rozpoznawane przez FFmpeg)")
+        all_filter.add_pattern("*")
+        chooser.add_filter(all_filter)
+        chooser.set_filter(all_filter)
+        filename = chooser.get_filename() if chooser.run() == Gtk.ResponseType.OK else None
+        chooser.destroy()
+        if not filename:
+            return
+        self.job_id += 1
+        self.export_id += 1
+        self.stop_process(self.download_proc)
+        self.stop_process(self.export_proc)
+        old = self.workdir
+        active = self.download_proc is not None and self.download_proc.poll() is None
+        self.workdir = None
+        self.clear_video()
+        if old and not active:
+            shutil.rmtree(old, ignore_errors=True)
+        self.workdir = tempfile.mkdtemp(prefix="yt-cut-")
+        self.is_downloading = True
+        self.download_btn.set_sensitive(False)
+        self.cancel_btn.set_sensitive(False)
+        self.progress.set_fraction(0)
+        self.progress.set_text("Odczytywanie pliku...")
+        self.status.set_text(f"Analiza: {Path(filename).name}")
+        job = self.job_id
+        threading.Thread(target=self.local_file_worker, args=(job, filename), daemon=True).start()
+
+    def local_file_worker(self, job, filename):
+        try:
+            path, duration, _ = probe_video(filename, "ffprobe")
+            GLib.idle_add(self.download_done, job, path, duration, "LOCAL_FILE")
+        except Exception as error:
+            GLib.idle_add(self.download_failed, job, str(error))
+
     def start_download(self, *_):
         url = self.url.get_text().strip()
         u = urlparse(url)
@@ -899,12 +949,14 @@ class YTCut(Gtk.Window):
         self.command("loadfile", path, "replace")
         self.command("set_property", "pause", True)
         self.apply_loop()
-        self.title_label.set_text(f"Wczytano {'fragment '+section[1:]+' • ' if section else 'film • '}{clock(duration)}")
+        label = (f"Plik: {Path(path).name}" if section == "LOCAL_FILE" else
+                 f"Wczytano {'fragment '+section[1:]+' • ' if section else 'film • '}{clock(duration)}")
+        self.title_label.set_text(label)
         self.status.set_text("Gotowe. Ustaw START/KONIEC, opcjonalnie efekty i kliknij Wytnij.")
         self.download_btn.set_sensitive(True)
         self.cancel_btn.set_sensitive(False)
         self.progress.set_fraction(1)
-        self.progress.set_text("Pobrano 100%")
+        self.progress.set_text("Plik wczytany" if section == "LOCAL_FILE" else "Pobrano 100%")
         for widget in (self.play_btn, self.frame_back_btn, self.frame_forward_btn, self.jump_btn, self.export_btn, self.mark_start_btn, self.mark_end_btn):
             widget.set_sensitive(True)
         self.timeline.queue_draw()

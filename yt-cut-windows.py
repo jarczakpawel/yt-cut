@@ -12,25 +12,34 @@ from pathlib import Path
 from urllib.parse import urlparse
 from hls_clip import download as download_hls, FastUnavailable
 from crop_geometry import ffmpeg_crop
+from media_probe import probe_video
 from crop_editor_qt import CropPanel
-from mpv_player import VideoSurface, MpvPlayer
+if sys.platform == "darwin":
+    from mac_player import VideoSurface, MpvPlayer
+else:
+    from mpv_player import VideoSurface, MpvPlayer
 
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, QRectF, QPointF
 from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF, QPalette
 from PySide6.QtWidgets import (
     QApplication, QWidget, QMainWindow, QVBoxLayout, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QComboBox, QCheckBox, QDoubleSpinBox, QProgressBar,
-    QFrame, QStackedWidget, QScrollArea, QSizePolicy, QListView,
+    QFrame, QStackedWidget, QScrollArea, QSizePolicy, QListView, QFileDialog,
 )
 
 BASE = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 TOOLS = BASE / "tools"
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-if TOOLS.is_dir():
-    os.environ["PATH"] = str(TOOLS) + os.pathsep + os.environ.get("PATH", "")
-FFMPEG = str(TOOLS / "ffmpeg.exe") if (TOOLS / "ffmpeg.exe").is_file() else "ffmpeg"
-FFPROBE = str(TOOLS / "ffprobe.exe") if (TOOLS / "ffprobe.exe").is_file() else "ffprobe"
-YTDLP = str(TOOLS / "yt-dlp.exe") if (TOOLS / "yt-dlp.exe").is_file() else "yt-dlp"
+paths = [str(TOOLS)] if TOOLS.is_dir() else []
+if sys.platform == "darwin":
+    paths += ["/opt/homebrew/bin", "/usr/local/bin"]
+if paths:
+    os.environ["PATH"] = os.pathsep.join(paths + [os.environ.get("PATH", "")])
+exe = ".exe" if sys.platform == "win32" else ""
+FFMPEG = str(TOOLS / f"ffmpeg{exe}") if (TOOLS / f"ffmpeg{exe}").is_file() else "ffmpeg"
+FFPROBE = str(TOOLS / f"ffprobe{exe}") if (TOOLS / f"ffprobe{exe}").is_file() else "ffprobe"
+ytdlp_binary = "yt-dlp_macos" if sys.platform == "darwin" else f"yt-dlp{exe}"
+YTDLP = str(TOOLS / ytdlp_binary) if (TOOLS / ytdlp_binary).is_file() else "yt-dlp"
 DOWNLOADS = Path.home() / "Downloads"
 
 
@@ -168,7 +177,7 @@ class Timeline(QWidget):
 class Window(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("YT Cut v1.0.19")
+        self.setWindowTitle("YT Cut v1.0.20")
         self.resize(1060, 750)
         self.setMinimumSize(640, 420)
         self.duration = 0
@@ -233,6 +242,9 @@ class Window(QMainWindow):
         self.download_button.setObjectName("primary")
         self.download_button.clicked.connect(self.download)
         urlrow.addWidget(self.download_button)
+        self.open_file_button = QPushButton("Otwórz plik")
+        self.open_file_button.clicked.connect(self.open_local_file)
+        urlrow.addWidget(self.open_file_button)
         self.cancel_button = QPushButton("Anuluj")
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self.cancel_download)
@@ -602,8 +614,11 @@ QCheckBox { spacing:5px; }
     def stop_process(self, process):
         if process and process.poll() is None:
             try:
-                subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)],
-                               capture_output=True, creationflags=CREATE_NO_WINDOW, timeout=4)
+                if sys.platform == "win32":
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                                   capture_output=True, creationflags=CREATE_NO_WINDOW, timeout=4)
+                else:
+                    process.terminate()
             except (OSError, subprocess.TimeoutExpired):
                 process.terminate()
 
@@ -615,6 +630,41 @@ QCheckBox { spacing:5px; }
             except OSError:
                 remaining.append(path)
         self.old_dirs = remaining
+
+    def open_local_file(self):
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Otwórz plik wideo", str(Path.home()),
+            "Wideo (*.mp4 *.mkv *.mov *.webm *.avi *.m4v *.wmv *.flv *.ts *.mts *.m2ts *.mpg *.mpeg *.3gp *.ogv *.vob);;Wszystkie pliki (*)",
+        )
+        if filename:
+            self.load_local_file(filename)
+
+    def load_local_file(self, filename):
+        if self.exporting:
+            self.cancel_export()
+        self.download_job += 1
+        self.stop_process(self.download_proc)
+        self.clear_media()
+        if self.directory:
+            self.old_dirs.append(self.directory)
+        self.directory = tempfile.mkdtemp(prefix="yt-cut-")
+        QTimer.singleShot(800, self.cleanup)
+        self.is_downloading = True
+        self.download_button.setEnabled(False)
+        self.open_file_button.setEnabled(False)
+        self.cancel_button.setEnabled(False)
+        self.progress.setRange(0, 0)
+        self.progress.setFormat("Odczytywanie pliku...")
+        self.status.setText(f"Analiza: {Path(filename).name}")
+        job = self.download_job
+        threading.Thread(target=self.local_file_worker, args=(job, filename), daemon=True).start()
+
+    def local_file_worker(self, job, filename):
+        try:
+            path, duration, fps = probe_video(filename, FFPROBE, CREATE_NO_WINDOW)
+            self.signals.downloaded.emit(job, path, duration, fps, "LOCAL_FILE", path)
+        except Exception as error:
+            self.signals.failed.emit(job, "Plik", str(error))
 
     def download(self):
         if self.exporting:
@@ -645,6 +695,7 @@ QCheckBox { spacing:5px; }
         self.directory = tempfile.mkdtemp(prefix="yt-cut-")
         QTimer.singleShot(800, self.cleanup)
         self.download_button.setEnabled(False)
+        self.open_file_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self.progress.setRange(0, 0)
         self.progress.setFormat("Pobieranie fragmentu..." if section else "Pobieranie filmu...")
@@ -815,20 +866,24 @@ QCheckBox { spacing:5px; }
         self.player.pause()
         self.update_fields()
         self.update_enabled()
-        self.title_text.setText(f"Wczytano {'fragment '+section[1:]+' • ' if section else 'film • '}{clock(duration)}")
+        title = (f"Plik: {Path(path).name}" if section == "LOCAL_FILE" else
+                 f"Wczytano {'fragment '+section[1:]+' • ' if section else 'film • '}{clock(duration)}")
+        self.title_text.setText(title)
         self.status.setText("Gotowe. Wybierz fragment i kliknij Wytnij.")
         self.progress.setRange(0, 1000)
         self.progress.setValue(1000)
-        self.progress.setFormat("Download complete 100%")
+        self.progress.setFormat("Plik wczytany" if section == "LOCAL_FILE" else "Download complete 100%")
         self.download_button.setEnabled(True)
+        self.open_file_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
 
     def on_failed(self, job, kind, message):
-        if kind == "Pobieranie":
+        if kind in ("Pobieranie", "Plik"):
             if job != self.download_job:
                 return
             self.is_downloading = False
             self.download_button.setEnabled(True)
+            self.open_file_button.setEnabled(True)
             self.cancel_button.setEnabled(False)
         else:
             if job != self.export_job:
@@ -850,6 +905,7 @@ QCheckBox { spacing:5px; }
             self.directory = None
         QTimer.singleShot(1000, self.cleanup)
         self.download_button.setEnabled(True)
+        self.open_file_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         self.status.setText("Pobieranie anulowane.")
         self.progress.setValue(0)
@@ -1057,6 +1113,34 @@ QCheckBox { spacing:5px; }
         super().closeEvent(event)
 
 
+def local_media_check():
+    with tempfile.TemporaryDirectory(prefix="ytcut-local-check-") as folder:
+        source = Path(folder) / "źródło z dysku.mkv"
+        generated = subprocess.run(
+            [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25",
+             "-t", "1.0", "-c:v", "mpeg4", str(source)],
+            capture_output=True, text=True, timeout=25,
+            creationflags=CREATE_NO_WINDOW,
+        )
+        if generated.returncode:
+            raise RuntimeError(generated.stderr[-700:])
+        path, duration, fps = probe_video(source, FFPROBE, CREATE_NO_WINDOW)
+        if path != str(source.resolve()) or not 900 <= duration <= 1100 or abs(fps - 25) > .01:
+            raise RuntimeError(f"Local source metadata invalid: {path}, {duration}, {fps}")
+        target = Path(folder) / "cut.mp4"
+        exported = subprocess.run(
+            [FFMPEG, "-hide_banner", "-loglevel", "error", "-y",
+             "-i", path, "-t", ".6", "-c:v", "libx264",
+             "-pix_fmt", "yuv420p", str(target)],
+            capture_output=True, text=True, timeout=25,
+            creationflags=CREATE_NO_WINDOW,
+        )
+        if exported.returncode or not target.is_file():
+            raise RuntimeError(f"Local file export failed: {exported.stderr[-700:]}")
+        print(f"PASS: local MKV input, metadata ({duration} ms, {fps:.1f} FPS), MP4 export")
+
+
 def self_check():
     for path in (FFMPEG, FFPROBE, YTDLP, str(TOOLS / "node.exe"),
                  str(TOOLS / "vulkan-1.dll"), str(TOOLS / "libmpv-2.dll")):
@@ -1104,12 +1188,15 @@ def media_check():
                 time.sleep(.025)
             if not window.player.ready:
                 raise RuntimeError(f"mpv startup in actual Window: {window.player.error}")
-            window.media = video
-            window.duration = 2000
-            window.end = 2000
-            window.update_fields()
-            window.update_enabled()
-            window.player.setSource(video)
+            window.load_local_file(video)
+            deadline = time.monotonic() + 10
+            while window.media != str(Path(video).resolve()) and time.monotonic() < deadline:
+                app.processEvents()
+                time.sleep(.03)
+            if window.media != str(Path(video).resolve()):
+                raise RuntimeError(f"Local file was not loaded into the window: {window.status.text()}")
+            if window.end < 1900 or window.start != 0 or not Path(video).is_file():
+                raise RuntimeError("Local import corrupted the original or timeline")
             window.player.play()
             deadline = time.monotonic() + 12
             while window.player.position() < 400 and not window.player.error and time.monotonic() < deadline:
@@ -1307,7 +1394,9 @@ def download_check():
 
 
 if __name__ == "__main__":
-    if "--self-check" in sys.argv:
+    if "--local-check" in sys.argv:
+        local_media_check()
+    elif "--self-check" in sys.argv:
         self_check()
     elif "--media-check" in sys.argv:
         media_check()

@@ -1,6 +1,6 @@
 # YT Cut
 
-A lightweight desktop application for downloading and precisely trimming YouTube videos. Available for **Windows and Linux**.
+A lightweight desktop application for downloading and precisely trimming YouTube videos or local video files. Available for **Windows, Linux and macOS**.
 
 ## Download
 
@@ -15,6 +15,18 @@ A lightweight desktop application for downloading and precisely trimming YouTube
 The Windows package includes the application, FFmpeg, FFprobe, yt-dlp, Node.js and libmpv. No separate Python installation is required. Keep the extracted files together.
 
 Windows may display a Microsoft SmartScreen warning because the executable is not digitally signed.
+
+### macOS (Intel and Apple Silicon)
+
+Download the macOS ZIP for your CPU from the [Releases page](https://github.com/jarczakpawel/yt-cut/releases/latest), extract YT-Cut.app, and open it. The app is ad-hoc signed but not Apple-notarized. If macOS blocks it, use Finder's Open context menu and the system's Privacy & Security controls.
+
+The macOS app requires FFmpeg/FFprobe for file inspection and encoding, plus yt-dlp and Node.js for YouTube downloads. Install them once with [Homebrew](https://brew.sh/):
+
+~~~bash
+brew install ffmpeg yt-dlp node
+~~~
+
+The app works with local files offline. It uses Qt Multimedia for preview and FFmpeg for export.
 
 ### Linux (Debian)
 
@@ -35,6 +47,8 @@ The Linux version embeds mpv in a GTK window, so it needs a running X11/XWayland
 ## Features
 
 - Download a YouTube video from a URL and preview it in the built-in player
+- **Open a local video file** without uploading, copying or modifying the original; import is checked with FFprobe
+- Open MP4, MKV, MOV, AVI, WebM, M4V, WMV, FLV, MPEG, TS, 3GP and other files supported by the installed FFmpeg (codec compatibility depends on FFmpeg and the platform decoder)
 - **Download only a selected time range** from a longer video, without downloading the entire video
 - See the calculated interval length update immediately when editing the FROM / TO fields
 - See live download progress for full videos, and FFmpeg processing progress for selected intervals
@@ -57,7 +71,7 @@ The Linux version embeds mpv in a GTK window, so it needs a running X11/XWayland
 
 ## How to trim a video
 
-1. Paste a YouTube URL and select **Download**.
+1. Paste a YouTube URL and select **Download**, or click **Otwórz plik** and select a local video file. Local files are not downloaded or copied.
 2. To download only part of a long video, enable **Download only a fragment** under the URL, enter **FROM** and **TO**, then start the download. Otherwise the entire video is downloaded. The preview timeline starts at zero for the downloaded fragment.
 3. Click the timeline to select a position (yellow marker). The white indicator shows the current playback position.
 4. Use **Ustaw START** and **Ustaw KONIEC**, drag the red markers, or enter timestamps directly.
@@ -82,13 +96,13 @@ Timestamp fields support `HH:MM:SS.mmm`. Export is performed with FFmpeg using a
 
 ## Platforms and dependencies
 
-| | Windows | Linux |
-| --- | --- | --- |
-| UI | PySide6 (Qt) | GTK 3 |
-| Video preview | libmpv in a native embedded HWND | mpv |
-| Download | yt-dlp | yt-dlp |
-| Export | FFmpeg | FFmpeg |
-| JavaScript runtime | Bundled Node.js | Node.js |
+| | Windows | Linux | macOS |
+| --- | --- | --- | --- |
+| UI | PySide6 (Qt) | GTK 3 | PySide6 (Qt) |
+| Video preview | libmpv in a native embedded HWND | mpv | Qt Multimedia |
+| Download | yt-dlp | yt-dlp | yt-dlp |
+| Export | FFmpeg | FFmpeg | FFmpeg |
+| JavaScript runtime | Bundled Node.js | Node.js | Node.js |
 
 Release archives are built automatically from the source code in this repository when a new version is published. The executable is unsigned.
 

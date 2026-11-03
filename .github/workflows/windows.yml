@@ -63,6 +63,8 @@ jobs:
           }
           $result = Start-Process -FilePath (Resolve-Path "$root\YT-Cut.exe").Path -ArgumentList "--self-check" -Wait -PassThru
           if ($result.ExitCode -ne 0) { throw "Windows self-check returned $($result.ExitCode)" }
+          $local = Start-Process -FilePath (Resolve-Path "$root\YT-Cut.exe").Path -ArgumentList "--local-check" -Wait -PassThru
+          if ($local.ExitCode -ne 0) { throw "Windows local file import check returned $($local.ExitCode)" }
           $media = Start-Process -FilePath (Resolve-Path "$root\\YT-Cut.exe").Path -ArgumentList "--media-check" -Wait -PassThru -WorkingDirectory (Resolve-Path $root).Path
           Get-Content "$root\\media-check.log"
           if ($media.ExitCode -ne 0) { throw "Windows media decoding and export check returned $($media.ExitCode)" }

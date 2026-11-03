@@ -50,6 +50,8 @@ jobs:
           & tools-bin\node.exe --version
       - name: Generate Windows icon
         run: python tools/create_icon.py
+      - name: Set release version
+        run: python tools/set_build_version.py
       - name: Bundle self-contained application
         shell: pwsh
         run: |

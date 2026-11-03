@@ -8,3 +8,4 @@ tools-bin/
 .venv/
 assets/*.ico
 assets/*.png
+build_version.py

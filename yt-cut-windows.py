@@ -13,6 +13,10 @@ from urllib.parse import urlparse
 from hls_clip import download as download_hls, FastUnavailable
 from crop_geometry import ffmpeg_crop
 from media_probe import probe_video
+try:
+    from build_version import VERSION
+except ImportError:
+    VERSION = "development"
 from crop_editor_qt import CropPanel
 if sys.platform == "darwin":
     from mac_player import VideoSurface, MpvPlayer
@@ -177,7 +181,7 @@ class Timeline(QWidget):
 class Window(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("YT Cut v1.0.20")
+        self.setWindowTitle(f"YT Cut {VERSION}")
         self.resize(1060, 750)
         self.setMinimumSize(640, 420)
         self.duration = 0
